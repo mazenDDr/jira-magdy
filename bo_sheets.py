@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -35,6 +36,11 @@ KEYWORDS = {
     "MDB": ["refund transaction", "purchase failed", "deposit didn't reflect", "pos transfer",
             "unable to deposit", "unable to withdraw"],
     "Product": ["different balance"],
+}
+# Team dropdown for the Assignee column: name -> words that identify them in a Jira display name.
+TEAM = {
+    "Mego": ["magdy"], "Helana": ["helana"], "Abdallah": ["abdalla", "abdullah"], "Heba": ["heba"],
+    "Reem": ["reem"], "Samy": ["samy"], "Bassem": ["bassem"], "Mayar": ["mayar"],
 }
 RESOLVED_CHOICES = ["Solved", "Pending for customer response", "On hold"]
 # tab name -> (source spreadsheet id, tab title to read, or "" for every tab)
@@ -217,15 +223,24 @@ def source_ticket_ids(gc, sheet_id, tab):
     return found
 
 
-def existing_choices(spreadsheet, title):
-    """Resolved-column picks already made in a tab, so a refresh doesn't wipe them."""
+def team_member(jira_name):
+    """Map a Jira display name to a team dropdown name ("" if not on the team)."""
+    low = (jira_name or "").lower()
+    for name, words in TEAM.items():
+        if any(w in low for w in words):
+            return name
+    return ""
+
+
+def existing_choices(spreadsheet, title, column="Resolved"):
+    """Dropdown picks already made in a tab, so a refresh doesn't wipe them."""
     try:
         values = spreadsheet.worksheet(title).get_all_values()
     except gspread.exceptions.WorksheetNotFound:
         return {}
-    if not values or "Resolved" not in values[0]:
+    if not values or column not in values[0]:
         return {}
-    col = values[0].index("Resolved")
+    col = values[0].index(column)
     return {r[0]: r[col] for r in values[1:] if len(r) > col and r[col]}
 
 
@@ -261,12 +276,14 @@ def todo_tabs(jira, gc, book):
         FIELDS)
     print(f"  {len(issues)} to-do tickets since {BO_FROM}")
     ids_by_tab = {tab: source_ticket_ids(gc, sid, source_tab) for tab, (sid, source_tab) in SOURCES.items()}
-    header = ["Key", "Link", "Request Type", "Summary", "Customer Ticket", "Status",
+    header = ["Key", "Link", "Request Type", "Customer Ticket", "Status",
               "Assignee", "Created", "Updated", "Resolved"]
     tabs = {name: [header] for name in [*SOURCES, "Others"]}
     choices = {}  # Resolved picks made earlier, kept even if a ticket moves to another tab
+    assignees = {}
     for name in tabs:
         choices.update(existing_choices(book, name))
+        assignees.update({k: v for k, v in existing_choices(book, name, "Assignee").items() if v in TEAM})
     conflicts = 0
     for i in issues:
         f = i["fields"]
@@ -274,13 +291,16 @@ def todo_tabs(jira, gc, book):
         in_sheets = [t for t, ids in ids_by_tab.items()
                      if i["key"] in ids or customer_ref(f["summary"]) in ids]
         conflicts += bool(in_sheets) and tab not in in_sheets
-        tabs[tab].append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f), f["summary"],
-                          customer_ref(f["summary"]), f["status"]["name"], person(f.get("assignee")),
+        # A pick made in the sheet wins; otherwise start from the Jira assignee.
+        who = assignees.get(i["key"]) or team_member((f.get("assignee") or {}).get("displayName"))
+        tabs[tab].append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f),
+                          customer_ref(f["summary"]), f["status"]["name"], who,
                           fmt(parse_dt(f["created"])), fmt(parse_dt(f["updated"])),
                           choices.get(i["key"], "")])
     for tab, rows in tabs.items():
         ws = write_tab(book, tab, rows)
         add_dropdown(book, ws, "Resolved", RESOLVED_CHOICES, len(rows) - 1)
+        add_dropdown(book, ws, "Assignee", list(TEAM), len(rows) - 1)
     if conflicts:
         print(f"  {conflicts} ticket(s) were routed by keyword to a different tab than a source sheet lists")
     for old in ("BO Tickets",):
@@ -373,5 +393,17 @@ def main():
     print("Done at", datetime.now(TZ).strftime("%Y-%m-%d %H:%M %Z"))
 
 
+def main_with_retry(attempts=4):
+    """Google allows ~60 reads a minute; if we hit that, wait for the window to reset and retry."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return main()
+        except gspread.exceptions.APIError as exc:
+            if exc.response.status_code != 429 or attempt == attempts:
+                raise
+            print(f"Google rate limit hit, waiting 70s (attempt {attempt}/{attempts})")
+            time.sleep(70)
+
+
 if __name__ == "__main__":
-    main()
+    main_with_retry()

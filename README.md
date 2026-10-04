@@ -37,3 +37,9 @@ Resolution, Labels, Created, Updated, Due Date, Description.
 - **In Progress**: tabs *In Progress* (with the BO team), *Pending Customer Response*,
   *Pending Other Teams* and *Productivity* (tickets moved to a Done status per person per day).
   The hours columns are live formulas, so they keep counting between runs.
+
+## Automatic refresh (every 10 minutes)
+
+`.github/workflows/sync.yml` runs `bo_sheets.py` every 10 minutes. It must be on the repo's default
+branch, and the repo needs two secrets (Settings → Secrets and variables → Actions):
+`JIRA_API_TOKEN` and `GOOGLE_SERVICE_ACCOUNT_JSON` (the full contents of the key file).
