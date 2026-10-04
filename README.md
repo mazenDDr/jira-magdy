@@ -26,3 +26,12 @@ python jira_to_sheets.py
 
 Available columns: Key, Link, Project, Type, Summary, Status, Priority, Assignee, Reporter,
 Resolution, Labels, Created, Updated, Due Date, Description.
+
+## BO team sheets (`bo_sheets.py`)
+
+`python bo_sheets.py` refreshes two sheets from Jira project `L1`:
+
+- **BO Tickets (Auto)**: every ticket from the last `BO_DAYS` days, tagged Installment / MDB / Other.
+- **In Progress**: tabs *In Progress* (with the BO team), *Pending Customer Response*,
+  *Pending Other Teams* and *Productivity* (tickets moved to a Done status per person per day).
+  The hours columns are live formulas, so they keep counting between runs.
