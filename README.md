@@ -38,8 +38,8 @@ Resolution, Labels, Created, Updated, Due Date, Description.
   *Pending Other Teams* and *Productivity* (tickets moved to a Done status per person per day).
   The hours columns are live formulas, so they keep counting between runs.
 
-## Automatic refresh (every 10 minutes)
+## Automatic refresh (every 30 minutes)
 
-`.github/workflows/sync.yml` runs `bo_sheets.py` every 10 minutes. It must be on the repo's default
+`.github/workflows/sync.yml` runs `bo_sheets.py` every 30 minutes. It must be on the repo's default
 branch, and the repo needs two secrets (Settings → Secrets and variables → Actions):
 `JIRA_API_TOKEN` and `GOOGLE_SERVICE_ACCOUNT_JSON` (the full contents of the key file).

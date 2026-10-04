@@ -2,7 +2,7 @@ name: Sync Jira to Google Sheets
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes (GitHub may delay runs by a few minutes)
+    - cron: "*/30 * * * *"   # every 30 minutes (GitHub may delay runs by a few minutes)
   workflow_dispatch:
 
 concurrency:
