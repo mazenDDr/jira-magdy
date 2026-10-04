@@ -191,6 +191,37 @@ def set_timezone(spreadsheet):
         "properties": {"timeZone": TZ.key}, "fields": "timeZone"}}]})
 
 
+def rgb(hex_color):
+    h = hex_color.lstrip("#")
+    return {"red": int(h[0:2], 16) / 255, "green": int(h[2:4], 16) / 255, "blue": int(h[4:6], 16) / 255}
+
+
+RESOLVED_COLORS = {"Solved": "#b7e1cd", "Pending for customer response": "#fce8b2", "On hold": "#f4c7c3"}
+TEAM_COLORS = dict(zip(TEAM, ["#c9daf8", "#d9d2e9", "#d0e0e3", "#ffe5d0", "#fff2cc",
+                              "#d9ead3", "#ead1dc", "#cfe2f3"]))
+STATUS_COLORS = {"To Do": "#e8eaed", "Clients To Do": "#e1d5f0", "In Progress": "#c9daf8",
+                 "Open": "#fff2cc", "Reopened": "#f4c7c3", "Pending Customer Response": "#fce8b2"}
+
+
+def apply_colors(spreadsheet, specs):
+    """Colour cells by value. specs: [(worksheet, column index, {value: hex colour})].
+
+    Old rules are deleted first so repeated runs don't pile up duplicates."""
+    meta = spreadsheet.fetch_sheet_metadata()
+    requests_ = []
+    for sheet in meta["sheets"]:
+        for n in reversed(range(len(sheet.get("conditionalFormats", [])))):
+            requests_.append({"deleteConditionalFormatRule": {"sheetId": sheet["properties"]["sheetId"], "index": n}})
+    for ws, col, colors in specs:
+        for value, colour in colors.items():
+            requests_.append({"addConditionalFormatRule": {"index": 0, "rule": {
+                "ranges": [{"sheetId": ws.id, "startRowIndex": 1, "startColumnIndex": col, "endColumnIndex": col + 1}],
+                "booleanRule": {"condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": value}]},
+                                "format": {"backgroundColor": rgb(colour)}}}}})
+    if requests_:
+        spreadsheet.batch_update({"requests": requests_})
+
+
 def drop_default_tab(spreadsheet):
     """Remove the empty 'Sheet1' tab that new spreadsheets start with."""
     try:
@@ -284,10 +315,15 @@ def todo_tabs(jira, gc, book):
                           customer_ref(f["summary"]), f["status"]["name"], who,
                           fmt(parse_dt(f["created"])), fmt(parse_dt(f["updated"])),
                           choices.get(i["key"], "")])
+    specs = []
     for tab, rows in tabs.items():
         ws = write_tab(book, tab, rows)
         add_dropdown(book, ws, "Resolved", RESOLVED_CHOICES, len(rows) - 1)
         add_dropdown(book, ws, "Assignee", TEAM, len(rows) - 1)
+        specs += [(ws, header.index("Resolved"), RESOLVED_COLORS),
+                  (ws, header.index("Assignee"), TEAM_COLORS),
+                  (ws, header.index("Status"), STATUS_COLORS)]
+    apply_colors(book, specs)
     if conflicts:
         print(f"  {conflicts} ticket(s) were routed by keyword to a different tab than a source sheet lists")
     for old in ("BO Tickets",):
@@ -371,10 +407,16 @@ def main():
     customer = [i for i in open_issues if i["fields"]["status"]["name"] == CUSTOMER_STATUS]
     other = [i for i in open_issues
              if i["fields"]["status"]["name"] not in BO_STATUSES + [CUSTOMER_STATUS]]
-    write_tab(book2, "In Progress", open_ticket_rows(jira, mine, "In Status"))
-    write_tab(book2, "Pending Customer Response", open_ticket_rows(jira, customer, "Sent To Customer"))
-    write_tab(book2, "Pending Other Teams", open_ticket_rows(jira, other, "In Status"))
+    specs = []
+    for title, issues_, label in [("In Progress", mine, "In Status"),
+                                  ("Pending Customer Response", customer, "Sent To Customer"),
+                                  ("Pending Other Teams", other, "In Status")]:
+        rows = open_ticket_rows(jira, issues_, label)
+        ws = write_tab(book2, title, rows)
+        specs += [(ws, rows[0].index("Status"), STATUS_COLORS),
+                  (ws, rows[0].index(f"Over {SLA_HOURS}h?"), {"OVERDUE": "#ea9999"})]
     write_tab(book2, "Productivity", productivity_rows(jira))
+    apply_colors(book2, specs)
     drop_default_tab(book2)
     print("  ", book2.url)
     print("Done at", datetime.now(TZ).strftime("%Y-%m-%d %H:%M %Z"))
