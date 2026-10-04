@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sync the BO team's (Jira project L1) tickets into two Google Sheets.
 
-Sheet 1 (BO_SHEET_ID)        tabs "MDB", "Installment", "Product": the L1 board's "To Do" and
+Sheet 1 (BO_SHEET_ID)        tabs "MDB", "Installment", "Product", "Others": the L1 board's "To Do" and
                              "Clients To Do" tickets created since BO_FROM, sorted into the tab
                              whose source sheet (see SOURCES) mentions the ticket.
 Sheet 2 (INPROGRESS_SHEET_ID) tabs:
@@ -29,6 +29,13 @@ PROJECT = os.environ.get("JIRA_PROJECT", "L1")
 TZ = ZoneInfo(os.environ.get("SHEET_TIMEZONE", "Africa/Cairo"))
 BO_FROM = os.environ.get("BO_FROM", "2026-10-01")
 BO_TODO_STATUSES = [x.strip() for x in os.environ.get("BO_TODO_STATUSES", "To Do,Clients To Do").split(",") if x.strip()]
+# Words in the Request Type that route a ticket straight to a tab (checked before the source sheets).
+KEYWORDS = {
+    "Installment": ["installment", "unable to pay due"],
+    "MDB": ["refund transaction", "purchase failed", "deposit didn't reflect", "pos transfer",
+            "unable to deposit", "unable to withdraw"],
+    "Product": ["different balance"],
+}
 RESOLVED_CHOICES = ["Solved", "Pending for customer response", "On hold"]
 # tab name -> (source spreadsheet id, tab title to read, or "" for every tab)
 SOURCES = {
@@ -232,35 +239,50 @@ def add_dropdown(spreadsheet, ws, header, choices, rows):
                  "showCustomUi": True, "strict": True}}}]})
 
 
+def route(issue, ids_by_tab):
+    """Tab for a ticket: request-type keywords first, then the source sheets, else Others."""
+    f = issue["fields"]
+    text = (request_type(f) or f["summary"]).lower().replace("\u2019", "'")
+    for tab, words in KEYWORDS.items():
+        if any(w in text for w in words):
+            return tab
+    ref = customer_ref(f["summary"])
+    for tab, ids in ids_by_tab.items():
+        if issue["key"] in ids or (ref and ref in ids):
+            return tab
+    return "Others"
+
+
 def todo_tabs(jira, gc, book):
-    """Build the MDB / Installment / Product tabs from the L1 board's to-do tickets."""
+    """Build the MDB / Installment / Product / Others tabs from the L1 board's to-do tickets."""
     statuses = ", ".join(f'"{x}"' for x in BO_TODO_STATUSES)
     issues = jira.search(
         f'project = {PROJECT} AND status in ({statuses}) AND created >= "{BO_FROM}" ORDER BY created DESC',
         FIELDS)
     print(f"  {len(issues)} to-do tickets since {BO_FROM}")
+    ids_by_tab = {tab: source_ticket_ids(gc, sid, source_tab) for tab, (sid, source_tab) in SOURCES.items()}
     header = ["Key", "Link", "Request Type", "Summary", "Customer Ticket", "Status",
               "Assignee", "Created", "Updated", "Resolved"]
-    matched = set()
-    for tab, (sheet_id, source_tab) in SOURCES.items():
-        ids = source_ticket_ids(gc, sheet_id, source_tab)
-        choices = existing_choices(book, tab)
-        rows = [header]
-        for i in issues:
-            f = i["fields"]
-            ref = customer_ref(f["summary"])
-            if i["key"] not in ids and (not ref or ref not in ids):
-                continue
-            matched.add(i["key"])
-            rows.append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f), f["summary"], ref,
-                         f["status"]["name"], person(f.get("assignee")),
-                         fmt(parse_dt(f["created"])), fmt(parse_dt(f["updated"])),
-                         choices.get(i["key"], "")])
+    tabs = {name: [header] for name in [*SOURCES, "Others"]}
+    choices = {}  # Resolved picks made earlier, kept even if a ticket moves to another tab
+    for name in tabs:
+        choices.update(existing_choices(book, name))
+    conflicts = 0
+    for i in issues:
+        f = i["fields"]
+        tab = route(i, ids_by_tab)
+        in_sheets = [t for t, ids in ids_by_tab.items()
+                     if i["key"] in ids or customer_ref(f["summary"]) in ids]
+        conflicts += bool(in_sheets) and tab not in in_sheets
+        tabs[tab].append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f), f["summary"],
+                          customer_ref(f["summary"]), f["status"]["name"], person(f.get("assignee")),
+                          fmt(parse_dt(f["created"])), fmt(parse_dt(f["updated"])),
+                          choices.get(i["key"], "")])
+    for tab, rows in tabs.items():
         ws = write_tab(book, tab, rows)
         add_dropdown(book, ws, "Resolved", RESOLVED_CHOICES, len(rows) - 1)
-        print(f"    {tab}: source sheet mentions {len(ids)} ticket numbers")
-    left = len(issues) - len(matched)
-    print(f"  {left} to-do tickets are not in any of the three source sheets (not shown)")
+    if conflicts:
+        print(f"  {conflicts} ticket(s) were routed by keyword to a different tab than a source sheet lists")
     for old in ("BO Tickets",):
         try:
             book.del_worksheet(book.worksheet(old))
