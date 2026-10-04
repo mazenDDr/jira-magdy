@@ -38,8 +38,8 @@ Resolution, Labels, Created, Updated, Due Date, Description.
   *Pending Other Teams* and *Productivity* (tickets moved to a Done status per person per day).
   The hours columns are live formulas, so they keep counting between runs.
 
-## Automatic refresh (every 30 minutes between 09:00 and 23:00 Cairo time)
+## Automatic refresh (every 30 minutes from 09:00 to 22:30 Cairo time and every hour from 23:00 to 08:00)
 
-`.github/workflows/sync.yml` runs `bo_sheets.py` every 30 minutes between 09:00 and 23:00 Cairo time. It must be on the repo's default
+`.github/workflows/sync.yml` runs `bo_sheets.py` every 30 minutes from 09:00 to 22:30 Cairo time and every hour from 23:00 to 08:00. It must be on the repo's default
 branch, and the repo needs two secrets (Settings → Secrets and variables → Actions):
 `JIRA_API_TOKEN` and `GOOGLE_SERVICE_ACCOUNT_JSON` (the full contents of the key file).

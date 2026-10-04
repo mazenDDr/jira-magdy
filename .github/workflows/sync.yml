@@ -2,9 +2,13 @@ name: Sync Jira to Google Sheets
 
 on:
   schedule:
-    # Every 30 minutes from 09:00 to 22:30 Cairo time (UTC+3 now, hours 6-19 UTC).
-    # Egypt moves to UTC+2 on 29 Oct 2026: change "6-19" to "7-20" to keep 09:00-22:30.
+    # Cairo time is UTC+3 until Egypt ends daylight saving at the end of October 2026.
+    # Day shift: every 30 minutes, 09:00-22:30 Cairo (06:00-19:30 UTC).
     - cron: "*/30 6-19 * * *"
+    # Night shift: every hour, 23:00-08:00 Cairo (20:00-05:00 UTC).
+    - cron: "0 20-23,0-5 * * *"
+    # When the clocks go back (UTC+2), shift both lines by one hour:
+    #   "*/30 7-20 * * *" and "0 21-23,0-6 * * *"
   workflow_dispatch:
 
 concurrency:
