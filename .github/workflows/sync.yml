@@ -2,7 +2,9 @@ name: Sync Jira to Google Sheets
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes (GitHub may delay runs by a few minutes)
+    # Every 30 minutes from 09:00 to 22:30 Cairo time (UTC+3 now, hours 6-19 UTC).
+    # Egypt moves to UTC+2 on 29 Oct 2026: change "6-19" to "7-20" to keep 09:00-22:30.
+    - cron: "*/30 6-19 * * *"
   workflow_dispatch:
 
 concurrency:
