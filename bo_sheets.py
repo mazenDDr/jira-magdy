@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Sync the BO team's (Jira project L1) tickets into two Google Sheets.
 
-Sheet 1 (BO_SHEET_ID)        tab "BO Tickets": every ticket created in the last BO_DAYS days.
+Sheet 1 (BO_SHEET_ID)        tabs "MDB", "Installment", "Product": the L1 board's "To Do" and
+                             "Clients To Do" tickets created since BO_FROM, sorted into the tab
+                             whose source sheet (see SOURCES) mentions the ticket.
 Sheet 2 (INPROGRESS_SHEET_ID) tabs:
     "In Progress"               open tickets currently with the BO team, time in status
     "Pending Customer Response" tickets sent back to the customer, time waiting
@@ -25,7 +27,16 @@ from google.oauth2.service_account import Credentials
 
 PROJECT = os.environ.get("JIRA_PROJECT", "L1")
 TZ = ZoneInfo(os.environ.get("SHEET_TIMEZONE", "Africa/Cairo"))
-BO_DAYS = int(os.environ.get("BO_DAYS", "90"))
+BO_FROM = os.environ.get("BO_FROM", "2026-10-01")
+BO_TODO_STATUSES = [x.strip() for x in os.environ.get("BO_TODO_STATUSES", "To Do,Clients To Do").split(",") if x.strip()]
+RESOLVED_CHOICES = ["Solved", "Pending for customer response", "On hold"]
+# tab name -> (source spreadsheet id, tab title to read, or "" for every tab)
+SOURCES = {
+    "MDB": (os.environ.get("MDB_SOURCE_ID", "1zkHFJxgOLRZXEFXcGV_LSjshLmLhXwxOvHLe9MspsV4"), ""),
+    "Installment": (os.environ.get("INSTALLMENT_SOURCE_ID", "11j8dl3PmN4dvW7ye6FigjMo2xxXLmBN3E9xkl996tKM"),
+                    os.environ.get("INSTALLMENT_SOURCE_TAB", "Callcenter Cases 2026 V2")),
+    "Product": (os.environ.get("PRODUCT_SOURCE_ID", "1TnX3FVx1zAEq2wPh_oXyUSHIPYvOJ1DTrQKekfFWfew"), ""),
+}
 PRODUCTIVITY_DAYS = int(os.environ.get("PRODUCTIVITY_DAYS", "30"))
 SLA_HOURS = int(os.environ.get("SLA_HOURS", "24"))
 CUSTOMER_STATUS = os.environ.get("CUSTOMER_STATUS", "Pending Customer Response")
@@ -182,18 +193,79 @@ def drop_default_tab(spreadsheet):
 
 # ------------------------------------------------------------- builders
 
-def sheet1_rows(jira):
-    issues = jira.search(f"project = {PROJECT} AND created >= -{BO_DAYS}d ORDER BY created DESC", FIELDS)
-    rows = [["Key", "Link", "Request Type", "Queue", "Summary", "Customer Ticket", "Status",
-             "Assignee", "Reporter", "Created", "Updated", "Resolved"]]
-    for i in issues:
-        f = i["fields"]
-        rows.append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f), queue_of(i),
-                     f["summary"], customer_ref(f["summary"]), f["status"]["name"],
-                     person(f.get("assignee")), person(f.get("reporter")),
-                     fmt(parse_dt(f["created"])), fmt(parse_dt(f["updated"])),
-                     fmt(parse_dt(f.get("resolutiondate")))])
-    return rows
+TICKET_ID = re.compile(r"\b((?:L1|CCS|CC2?)-\d+)\b", re.I)
+
+
+def source_ticket_ids(gc, sheet_id, tab):
+    """Every ticket number (L1-1234, CCS-1234, CC2-1234) mentioned in a source sheet."""
+    book = gc.open_by_key(sheet_id)
+    found = set()
+    for ws in book.worksheets():
+        if tab and ws.title.strip().lower() != tab.strip().lower():
+            continue
+        for row in ws.get_all_values():
+            for cell in row:
+                if len(cell) <= 40:
+                    found.update(m.upper() for m in TICKET_ID.findall(cell))
+    return found
+
+
+def existing_choices(spreadsheet, title):
+    """Resolved-column picks already made in a tab, so a refresh doesn't wipe them."""
+    try:
+        values = spreadsheet.worksheet(title).get_all_values()
+    except gspread.exceptions.WorksheetNotFound:
+        return {}
+    if not values or "Resolved" not in values[0]:
+        return {}
+    col = values[0].index("Resolved")
+    return {r[0]: r[col] for r in values[1:] if len(r) > col and r[col]}
+
+
+def add_dropdown(spreadsheet, ws, header, choices, rows):
+    col = ws.row_values(1).index(header)
+    spreadsheet.batch_update({"requests": [{"setDataValidation": {
+        "range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": max(rows, 1) + 1,
+                  "startColumnIndex": col, "endColumnIndex": col + 1},
+        "rule": {"condition": {"type": "ONE_OF_LIST",
+                               "values": [{"userEnteredValue": c} for c in choices]},
+                 "showCustomUi": True, "strict": True}}}]})
+
+
+def todo_tabs(jira, gc, book):
+    """Build the MDB / Installment / Product tabs from the L1 board's to-do tickets."""
+    statuses = ", ".join(f'"{x}"' for x in BO_TODO_STATUSES)
+    issues = jira.search(
+        f'project = {PROJECT} AND status in ({statuses}) AND created >= "{BO_FROM}" ORDER BY created DESC',
+        FIELDS)
+    print(f"  {len(issues)} to-do tickets since {BO_FROM}")
+    header = ["Key", "Link", "Request Type", "Summary", "Customer Ticket", "Status",
+              "Assignee", "Created", "Updated", "Resolved"]
+    matched = set()
+    for tab, (sheet_id, source_tab) in SOURCES.items():
+        ids = source_ticket_ids(gc, sheet_id, source_tab)
+        choices = existing_choices(book, tab)
+        rows = [header]
+        for i in issues:
+            f = i["fields"]
+            ref = customer_ref(f["summary"])
+            if i["key"] not in ids and (not ref or ref not in ids):
+                continue
+            matched.add(i["key"])
+            rows.append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f), f["summary"], ref,
+                         f["status"]["name"], person(f.get("assignee")),
+                         fmt(parse_dt(f["created"])), fmt(parse_dt(f["updated"])),
+                         choices.get(i["key"], "")])
+        ws = write_tab(book, tab, rows)
+        add_dropdown(book, ws, "Resolved", RESOLVED_CHOICES, len(rows) - 1)
+        print(f"    {tab}: source sheet mentions {len(ids)} ticket numbers")
+    left = len(issues) - len(matched)
+    print(f"  {left} to-do tickets are not in any of the three source sheets (not shown)")
+    for old in ("BO Tickets",):
+        try:
+            book.del_worksheet(book.worksheet(old))
+        except gspread.exceptions.WorksheetNotFound:
+            pass
 
 
 def open_ticket_rows(jira, issues, hours_label):
@@ -254,10 +326,10 @@ def main():
     jira = Jira()
     gc = google()
 
-    print("Sheet 1: all BO tickets")
+    print("Sheet 1: BO to-do tickets by team")
     book1 = gc.open_by_key(env("BO_SHEET_ID"))
     set_timezone(book1)
-    write_tab(book1, "BO Tickets", sheet1_rows(jira))
+    todo_tabs(jira, gc, book1)
     drop_default_tab(book1)
     print("  ", book1.url)
 

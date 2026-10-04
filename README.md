@@ -31,7 +31,9 @@ Resolution, Labels, Created, Updated, Due Date, Description.
 
 `python bo_sheets.py` refreshes two sheets from Jira project `L1`:
 
-- **BO Tickets (Auto)**: every ticket from the last `BO_DAYS` days, tagged Installment / MDB / Other.
+- **BO Tickets (Auto)**: the L1 board's *To Do* and *Clients To Do* tickets created since `BO_FROM`, split into
+  tabs **MDB**, **Installment** and **Product** by looking each ticket up in the matching source sheet.
+  The *Resolved* column is a dropdown (Solved / Pending for customer response / On hold); picks survive refreshes.
 - **In Progress**: tabs *In Progress* (with the BO team), *Pending Customer Response*,
   *Pending Other Teams* and *Productivity* (tickets moved to a Done status per person per day).
   The hours columns are live formulas, so they keep counting between runs.
