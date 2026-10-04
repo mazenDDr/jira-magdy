@@ -37,11 +37,8 @@ KEYWORDS = {
             "unable to deposit", "unable to withdraw"],
     "Product": ["different balance"],
 }
-# Team dropdown for the Assignee column: name -> words that identify them in a Jira display name.
-TEAM = {
-    "Mego": ["magdy"], "Helana": ["helana"], "Abdallah": ["abdalla", "abdullah"], "Heba": ["heba"],
-    "Reem": ["reem"], "Samy": ["samy"], "Bassem": ["bassem"], "Mayar": ["mayar"],
-}
+# Names in the Assignee dropdown, used exactly as given. Picked by hand in the sheet, never matched to Jira.
+TEAM = ["Mego", "Helana", "Abdallah", "Heba", "Reem", "Samy", "Bassem", "Mayar"]
 RESOLVED_CHOICES = ["Solved", "Pending for customer response", "On hold"]
 # tab name -> (source spreadsheet id, tab title to read, or "" for every tab)
 SOURCES = {
@@ -223,15 +220,6 @@ def source_ticket_ids(gc, sheet_id, tab):
     return found
 
 
-def team_member(jira_name):
-    """Map a Jira display name to a team dropdown name ("" if not on the team)."""
-    low = (jira_name or "").lower()
-    for name, words in TEAM.items():
-        if any(w in low for w in words):
-            return name
-    return ""
-
-
 def existing_choices(spreadsheet, title, column="Resolved"):
     """Dropdown picks already made in a tab, so a refresh doesn't wipe them."""
     try:
@@ -291,8 +279,7 @@ def todo_tabs(jira, gc, book):
         in_sheets = [t for t, ids in ids_by_tab.items()
                      if i["key"] in ids or customer_ref(f["summary"]) in ids]
         conflicts += bool(in_sheets) and tab not in in_sheets
-        # A pick made in the sheet wins; otherwise start from the Jira assignee.
-        who = assignees.get(i["key"]) or team_member((f.get("assignee") or {}).get("displayName"))
+        who = assignees.get(i["key"], "")
         tabs[tab].append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f),
                           customer_ref(f["summary"]), f["status"]["name"], who,
                           fmt(parse_dt(f["created"])), fmt(parse_dt(f["updated"])),
@@ -300,7 +287,7 @@ def todo_tabs(jira, gc, book):
     for tab, rows in tabs.items():
         ws = write_tab(book, tab, rows)
         add_dropdown(book, ws, "Resolved", RESOLVED_CHOICES, len(rows) - 1)
-        add_dropdown(book, ws, "Assignee", list(TEAM), len(rows) - 1)
+        add_dropdown(book, ws, "Assignee", TEAM, len(rows) - 1)
     if conflicts:
         print(f"  {conflicts} ticket(s) were routed by keyword to a different tab than a source sheet lists")
     for old in ("BO Tickets",):
