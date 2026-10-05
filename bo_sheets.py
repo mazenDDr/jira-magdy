@@ -215,7 +215,7 @@ def set_order(book, titles):
         "properties": {"sheetId": cache[t].id, "index": n}, "fields": "index"}} for n, t in enumerate(titles)]})
 
 
-def write_tab(book, title, rows, number_formats=None, dropdowns=None, hidden=False):
+def write_tab(book, title, rows, number_formats=None, dropdowns=None, hidden=False, filter_cols=None):
     """Queue a tab's new contents. flush() sends every queued tab to Google in three calls."""
     ncols, nrows = len(rows[0]), len(rows)
     ws = get_ws(book, title, ncols)
@@ -232,9 +232,12 @@ def write_tab(book, title, rows, number_formats=None, dropdowns=None, hidden=Fal
                         "cell": {"userEnteredFormat": {"textFormat": {"bold": True},
                                                        "backgroundColor": rgb("#94c4b5")}},
                         "fields": "userEnteredFormat(textFormat,backgroundColor)"}},
-        {"setBasicFilter": {"filter": {"range": {**sheet, "startRowIndex": 0, "startColumnIndex": 0,
-                                                 "endColumnIndex": ncols}}}},
     ]
+    if filter_cols != 0:  # filter only the ticket columns, never the counters beside them
+        reqs.append({"setBasicFilter": {"filter": {"range": {**sheet, "startRowIndex": 0, "startColumnIndex": 0,
+                                                            "endColumnIndex": filter_cols or ncols}}}})
+    else:
+        reqs.append({"clearBasicFilter": {"sheetId": ws.id}})
     for header, pattern in (number_formats or {}).items():
         reqs.append({"repeatCell": {"range": cell_range(rows[0].index(header)),
                                     "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": pattern}}},
@@ -396,6 +399,37 @@ def backlog_tab(jira, book):
     return [(ws, 1, "#57bb8a"), (ws, 2, "#f6b26b"), (ws, 3, "#e06666")]
 
 
+def bo_productivity_rows(header, tab_names):
+    """Live counts straight from the team tabs, so they follow the Resolved and Assignee dropdowns."""
+    res, asg = letter(header, "Resolved"), letter(header, "Assignee")
+    count = lambda tab, col, value: f"=COUNTIF('{tab}'!{col}2:{col},\"{value}\")"
+    team = [["Team", "Total Tickets", *RESOLVED_CHOICES, "Not Set Yet"]]
+    for n, tab in enumerate(tab_names, start=2):
+        team.append([tab, Formula(f"=COUNTA('{tab}'!A2:A)"),
+                     *[Formula(count(tab, res, c)) for c in RESOLVED_CHOICES],
+                     Formula(f"=B{n}-SUM(C{n}:E{n})")])
+    last = len(team)
+    team.append(["Total", *[Formula(f"=SUM({chr(ord('B') + k)}2:{chr(ord('B') + k)}{last})") for k in range(5)]])
+
+    people = [["Person", *tab_names, "Total"]]
+    for n, name in enumerate(TEAM, start=2):
+        people.append([name, *[Formula(count(tab, asg, name)) for tab in tab_names],
+                       Formula(f"=SUM(I{n}:{chr(ord('H') + len(tab_names))}{n})")])
+    first, end = 2, len(people)
+    people.append(["No one picked yet", *[
+        Formula(f"=COUNTA('{tab}'!A2:A)-SUM({chr(ord('I') + k)}{first}:{chr(ord('I') + k)}{end})")
+        for k, tab in enumerate(tab_names)],
+        Formula(f"=SUM(I{end + 1}:{chr(ord('H') + len(tab_names))}{end + 1})")])
+
+    width_t, width_p = len(team[0]), len(people[0])
+    rows = []
+    for n in range(max(len(team), len(people))):
+        left = team[n] if n < len(team) else [""] * width_t
+        right = people[n] if n < len(people) else [""] * width_p
+        rows.append([*left, "", *right])
+    return rows
+
+
 def todo_tabs(jira, book, ids_by_tab):
     """Build the MDB / Installment / Product / Others tabs from the L1 board's to-do tickets."""
     issues = jira.search(*q_todo())
@@ -425,12 +459,13 @@ def todo_tabs(jira, book, ids_by_tab):
                   (ws, header.index("Assignee"), TEAM_COLORS),
                   (ws, header.index("Status"), STATUS_COLORS)]
     specs += backlog_tab(jira, book)
+    write_tab(book, "Productivity", bo_productivity_rows(header, list(tabs)), filter_cols=0)
     flush(book)
     apply_colors(book, specs)
     if conflicts:
         print(f"  {conflicts} ticket(s) were routed by keyword to a different tab than a source sheet lists")
     delete_tab(book, "BO Tickets")
-    set_order(book, ["Backlog", *tabs])
+    set_order(book, ["Backlog", "Productivity", *tabs])
 
 
 def done_statuses(jira):
@@ -464,7 +499,12 @@ def team_rows(jira, items, choices):
     header = ["Key", "Link", "Request Type", "Summary", "Person", "Status", "Jira Status",
               "In Status Since", "Hours", "Created", "Days Since Arrived", "Days In Progress"]
     since_col, created_col = letter(header, "In Status Since"), letter(header, "Created")
-    rows = [header]
+    status_col = letter(header, "Status")
+    # Live counters in the always-visible header row, beside the filtered ticket columns.
+    counters = ["", Formula('="Total: "&COUNTA(A2:A)'),
+                Formula(f'="In Progress: "&COUNTIF({status_col}2:{status_col},"In Progress")'),
+                Formula(f'="Done: "&COUNTIF({status_col}2:{status_col},"Done")')]
+    rows = [header + counters]
     items = sorted(items, key=lambda x: (person(x[0]["fields"].get("assignee")), x[1]))
     for n, (i, since) in enumerate(items, start=2):
         f = i["fields"]
@@ -482,8 +522,9 @@ def pending_rows(jira, items):
     header = ["Key", "Link", "Request Type", "Summary", "Person", "Status", "Sent To Customer",
               "Hours", over_label, "Created", "Days Since Arrived", "Days Waiting For Customer"]
     since_col, created_col = letter(header, "Sent To Customer"), letter(header, "Created")
-    hours_col = letter(header, "Hours")
-    rows = [header]
+    hours_col, over_col = letter(header, "Hours"), letter(header, over_label)
+    rows = [header + ["", Formula('="Total: "&COUNTA(A2:A)'),
+                      Formula(f'="Overdue: "&COUNTIF({over_col}2:{over_col},"OVERDUE")')]]
     items = sorted(items, key=lambda x: (person(x[0]["fields"].get("assignee")), x[1]))
     for n, (i, since) in enumerate(items, start=2):
         f = i["fields"]
@@ -500,7 +541,7 @@ def pending_rows(jira, items):
 def productivity_rows(counts):
     """One row per person: total cases and how many are in progress / done / waiting on the customer."""
     header = ["Person", "Total Cases", "In Progress", f"Done (last {PRODUCTIVITY_DAYS} days)", "Pending Customer"]
-    rows = [header]
+    rows = [header + ["", Formula('="All people: "&SUM(B2:B)')]]
     for who, c in sorted(counts.items(), key=lambda kv: (-sum(kv[1].values()), kv[0])):
         rows.append([who, sum(c.values()), c["progress"], c["done"], c["customer"]])
     return rows
@@ -603,15 +644,15 @@ def progress_book(jira, book, ids_by_tab, log):
     for tab in team_tabs:
         rows = team_rows(jira, by_tab[tab], choices)
         ws = write_tab(book, tab, rows, {"Hours": "0.0", "Days Since Arrived": "0.0", "Days In Progress": "0.0"},
-                       dropdowns={"Status": PROGRESS_CHOICES})
+                       dropdowns={"Status": PROGRESS_CHOICES}, filter_cols=12)
         specs.append((ws, rows[0].index("Status"), STATUS_COLORS))
     rows = pending_rows(jira, customer)
     ws = write_tab(book, "Pending Customer Response", rows,
-                   {"Hours": "0.0", "Days Since Arrived": "0.0", "Days Waiting For Customer": "0.0"})
+                   {"Hours": "0.0", "Days Since Arrived": "0.0", "Days Waiting For Customer": "0.0"}, filter_cols=12)
     specs += [(ws, rows[0].index("Status"), STATUS_COLORS),
               (ws, rows[0].index(f"Over {PENDING_SLA_HOURS}h?"), {"OVERDUE": "#ea9999"})]
     rows = productivity_rows(counts)
-    ws = write_tab(book, "Productivity", rows)
+    ws = write_tab(book, "Productivity", rows, filter_cols=5)
     specs += [(ws, 2, "#f6b26b"), (ws, 3, "#57bb8a"), (ws, 4, "#ffd966")]
     write_tab(book, DONE_LOG_TAB, done_log_rows(entries), hidden=True)  # kept for the next run, hidden from view
     flush(book)
