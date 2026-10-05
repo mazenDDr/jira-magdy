@@ -37,8 +37,8 @@ Resolution, Labels, Created, Updated, Due Date, Description.
 - **In Progress** sheet: tabs **MDB**, **Installment**, **Product** and **Others** (open tickets with the BO team, routed like
   sheet 1; *Status* is an In Progress / Done dropdown the team sets), **Pending Customer Response** (flagged OVERDUE after
   `PENDING_SLA_HOURS`, 48 by default) and **Productivity** (one row per person: total cases, in progress, done, pending
-  customer). People in `EXCLUDED_PEOPLE` are left out. Hours and day counters are live formulas.
-- **BO Tickets** also has a **Backlog** tab: Closed / Pending / Untouched counts per contact type since `BO_FROM`.
+  customer). People in `EXCLUDED_PEOPLE` are left out. Hours and day counters are live formulas, and the header row of each tab shows live totals (Total / In Progress / Done, or Total / Overdue).
+- **BO Tickets** also has a **Productivity** tab (live counts per team and per person, following the Resolved and Assignee dropdowns) and a **Backlog** tab: Closed / Pending / Untouched counts per contact type since `BO_FROM`.
 
 ## Automatic refresh
 
