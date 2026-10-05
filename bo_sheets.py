@@ -65,6 +65,9 @@ MDB_WORDS = [w.strip().lower() for w in os.environ.get("MDB_KEYWORDS", "").split
 REQUEST_TYPE_FIELD = "customfield_11163"
 RELATED_FIELD = "customfield_11301"  # Jira "Related Tickets Status", e.g. "Operations (OPS-1934): Pending CS |"
 # Columns copied from each source sheet into the BO tabs: {column on our tab: header in the source sheet}.
+EXTRA_ROWS, MIN_ROWS, EXTRA_COLS, MIN_COLS = 500, 1000, 6, 26  # free space left around every table
+PROJECT_CHOICES = ["Lucky", "Chat", "Bsata", "Hyper", "NTG", "Mozare3", "Basata"]  # MDB "Project" dropdown
+KEEP_PICKS = ["Comment", "Project"]  # typed or picked in the sheet; kept when the source sheet has nothing
 SOURCE_DROPDOWNS = {"MDB": ["Validation"]}  # new columns that keep a dropdown, using the source sheet's own list
 SOURCE_COLUMNS = {
     "MDB": {"Card #": "card #", "Acc No": "acc no", "Description": "descrebtion", "Amount": "amount",
@@ -233,8 +236,10 @@ def write_tab(book, title, rows, number_formats=None, dropdowns=None, hidden=Fal
     sheet = {"sheetId": ws.id}
     cell_range = lambda col: {**sheet, "startRowIndex": 1, "startColumnIndex": col, "endColumnIndex": col + 1}
     reqs = [
+        # Leave free rows and columns like a normal sheet, so people can type below and beside the table.
         {"updateSheetProperties": {"properties": {**sheet, "hidden": hidden, "gridProperties": {
-            "rowCount": max(nrows, 2), "columnCount": ncols, "frozenRowCount": 1}},
+            "rowCount": max(nrows + EXTRA_ROWS, MIN_ROWS), "columnCount": max(ncols + EXTRA_COLS, MIN_COLS),
+            "frozenRowCount": 1}},
             "fields": "hidden,gridProperties(rowCount,columnCount,frozenRowCount)"}},
         # Google copies a column's dropdown onto columns added beside it, and old layouts leave theirs behind:
         # remove every dropdown first, then set only the ones this tab is meant to have.
@@ -242,7 +247,8 @@ def write_tab(book, title, rows, number_formats=None, dropdowns=None, hidden=Fal
         # clearing values keeps old cell formats; reset them so a changed layout can't show numbers as dates.
         {"repeatCell": {"range": sheet, "cell": {"userEnteredFormat": {}},
                         "fields": "userEnteredFormat.numberFormat"}},
-        {"repeatCell": {"range": {**sheet, "startRowIndex": 0, "endRowIndex": 1},
+        {"repeatCell": {"range": {**sheet, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0,
+                                  "endColumnIndex": ncols},
                         "cell": {"userEnteredFormat": {"textFormat": {"bold": True},
                                                        "backgroundColor": rgb("#94c4b5")}},
                         "fields": "userEnteredFormat(textFormat,backgroundColor)"}},
@@ -493,7 +499,7 @@ def todo_tabs(jira, book, ids_by_tab, data_by_tab, lists_by_tab):
     # MDB gets the MDP sheet's case columns; every other tab gets a Comment column.
     extras = {name: list(SOURCE_COLUMNS["MDB"]) if name == "MDB" else ["Comment"] for name in [*SOURCES, "Others"]}
     tabs = {name: [header + extras[name]] for name in extras}
-    picks = read_picks(book, list(tabs), ["Resolved", "Assignee", "Comment"])  # kept even if a ticket moves tab
+    picks = read_picks(book, list(tabs), ["Resolved", "Assignee", *KEEP_PICKS])  # kept even if a ticket moves tab
     choices = picks["Resolved"]
     assignees = {k: v for k, v in picks["Assignee"].items() if v in TEAM}
     conflicts = 0
@@ -509,7 +515,7 @@ def todo_tabs(jira, book, ids_by_tab, data_by_tab, lists_by_tab):
         info = found.get(i["key"].upper()) or found.get(ref.upper()) or {}
         extra = []
         for label in extras[tab]:
-            value = info.get(label) or (picks["Comment"].get(i["key"], "") if label == "Comment" else "")
+            value = info.get(label) or (picks[label].get(i["key"], "") if label in KEEP_PICKS else "")
             extra.append("'" + value if value and label in TEXT_COLUMNS else value)
         tabs[tab].append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f),
                           ref, f["status"]["name"], who,
@@ -523,7 +529,10 @@ def todo_tabs(jira, book, ids_by_tab, data_by_tab, lists_by_tab):
                 at = rows[0].index(label)
                 present = {r[at] for r in rows[1:] if len(r) > at}
                 dropdowns[label] = options + sorted(v for v in present if v and v not in options)
-        ws = write_tab(book, tab, rows, dropdowns=dropdowns, loose=tuple(SOURCE_DROPDOWNS.get(tab, ())))
+        loose = tuple(SOURCE_DROPDOWNS.get(tab, ()))
+        if tab == "MDB":
+            dropdowns["Project"], loose = PROJECT_CHOICES, loose + ("Project",)
+        ws = write_tab(book, tab, rows, dropdowns=dropdowns, loose=loose)
         specs += [(ws, header.index("Resolved"), RESOLVED_COLORS),
                   (ws, header.index("Assignee"), TEAM_COLORS),
                   (ws, header.index("Status"), STATUS_COLORS)]

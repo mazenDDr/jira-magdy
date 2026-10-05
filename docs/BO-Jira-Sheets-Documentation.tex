@@ -349,7 +349,12 @@ is found by the ticket number, as in Section~\ref{sec:routing}.
   \item \emph{Card \#} and \emph{Acc No} are stored as text, so numbers such as \code{0538} keep their leading zero.
   \item \emph{Validation} is a dropdown that uses the same list of choices as the MDP sheet's own Validation column
     (the program reads that list from the MDP sheet on every run). It also accepts values already in the cells.
-    All other copied columns, and every \emph{Comment} column, are plain text with no dropdown.
+    All other copied columns, and every \emph{Comment} column, are plain text with no dropdown, with one exception:
+  \item \emph{Project} (MDB tab) is a dropdown with the choices Lucky, Chat, Bsata, Hyper, NTG, Mozare3, and Basata. A
+    different value from the MDP sheet, such as ``Hyper One'', is still accepted. A choice made in the sheet is kept
+    while the MDP sheet has no project for that ticket; once the MDP sheet has one, it replaces the choice.
+  \item Every tab is left with free rows and columns (at least 1\,000 rows and 26 columns), so people can type below and
+    beside the tables as in any normal sheet.
 \end{itemize}
 
 \subsection{The dropdowns}
