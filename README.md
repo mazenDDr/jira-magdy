@@ -34,9 +34,9 @@ Resolution, Labels, Created, Updated, Due Date, Description.
 - **BO Tickets (Auto)**: the L1 board's *To Do* and *Clients To Do* tickets created since `BO_FROM`, split into
   tabs **MDB**, **Installment** and **Product** by looking each ticket up in the matching source sheet.
   The *Resolved* column is a dropdown (Solved / Pending for customer response / On hold); picks survive refreshes.
-- **In Progress**: tabs *In Progress* (with the BO team), *Pending Customer Response*,
-  *Pending Other Teams* and *Productivity* (tickets moved to a Done status per person per day).
-  The hours columns are live formulas, so they keep counting between runs.
+- **In Progress**: tabs *In Progress* (open tickets with the BO team plus tickets finished since `BO_FROM`, each with
+  a Person and a Status of In Progress or Done), *Pending Customer Response* and *Productivity* (tickets moved to a Done
+  status per person per day). People in `EXCLUDED_PEOPLE` are left out. Hours for open tickets are live formulas.
 
 ## Automatic refresh (every 30 minutes from 09:00 to 22:30 Cairo time and every hour from 23:00 to 08:00)
 

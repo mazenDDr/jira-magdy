@@ -47,12 +47,15 @@ SOURCES = {
                     os.environ.get("INSTALLMENT_SOURCE_TAB", "Callcenter Cases 2026 V2")),
     "Product": (os.environ.get("PRODUCT_SOURCE_ID", "1TnX3FVx1zAEq2wPh_oXyUSHIPYvOJ1DTrQKekfFWfew"), ""),
 }
+# People left out of the In Progress sheet (matched on the Jira display name, case-insensitive).
+EXCLUDED_PEOPLE = {x.strip().lower() for x in os.environ.get(
+    "EXCLUDED_PEOPLE", "loay.khaled,nourhan.khaled,mohanad.maher,Abdullah Mubark").split(",") if x.strip()}
+# Jira statuses that count as "In Progress" in sheet 2 (the ticket is being worked by the BO team).
+INPROGRESS_STATUSES = [x.strip() for x in os.environ.get(
+    "INPROGRESS_STATUSES", "In Progress,Open,Reopened,Work in progress").split(",") if x.strip()]
 PRODUCTIVITY_DAYS = int(os.environ.get("PRODUCTIVITY_DAYS", "30"))
 SLA_HOURS = int(os.environ.get("SLA_HOURS", "24"))
 CUSTOMER_STATUS = os.environ.get("CUSTOMER_STATUS", "Pending Customer Response")
-# Statuses where the ticket is being worked by the BO team itself.
-BO_STATUSES = [s.strip() for s in os.environ.get(
-    "BO_STATUSES", "In Progress,To Do,Open,Reopened,Work in progress").split(",") if s.strip()]
 # A ticket whose request type or summary contains one of these words belongs to the queue.
 INSTALLMENT_WORDS = [w.strip().lower() for w in os.environ.get("INSTALLMENT_KEYWORDS", "installment").split(",") if w.strip()]
 MDB_WORDS = [w.strip().lower() for w in os.environ.get("MDB_KEYWORDS", "").split(",") if w.strip()]
@@ -167,13 +170,23 @@ def safe(cell):
     return cell
 
 
-def write_tab(spreadsheet, title, rows, widths=None, filter_range=True):
+def write_tab(spreadsheet, title, rows, number_formats=None, filter_range=True):
     try:
         ws = spreadsheet.worksheet(title)
     except gspread.exceptions.WorksheetNotFound:
         ws = spreadsheet.add_worksheet(title, rows=2, cols=len(rows[0]))
     ws.clear()
     ws.resize(rows=max(len(rows), 2), cols=len(rows[0]))
+    # clear() keeps old cell formats; reset them so a changed layout can't show numbers as dates.
+    reqs = [{"repeatCell": {"range": {"sheetId": ws.id}, "cell": {"userEnteredFormat": {}},
+                            "fields": "userEnteredFormat.numberFormat"}}]
+    for header, pattern in (number_formats or {}).items():
+        col = rows[0].index(header)
+        reqs.append({"repeatCell": {
+            "range": {"sheetId": ws.id, "startRowIndex": 1, "startColumnIndex": col, "endColumnIndex": col + 1},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": pattern}}},
+            "fields": "userEnteredFormat.numberFormat"}})
+    spreadsheet.batch_update({"requests": reqs})
     body = [rows[0]] + [[safe(c) for c in r] for r in rows[1:]]
     for start in range(0, len(body), 5000):
         ws.update(body[start:start + 5000], f"A{start + 1}", value_input_option="USER_ENTERED")
@@ -199,7 +212,7 @@ def rgb(hex_color):
 RESOLVED_COLORS = {"Solved": "#b7e1cd", "Pending for customer response": "#fce8b2", "On hold": "#f4c7c3"}
 TEAM_COLORS = dict(zip(TEAM, ["#c9daf8", "#d9d2e9", "#d0e0e3", "#ffe5d0", "#fff2cc",
                               "#d9ead3", "#ead1dc", "#cfe2f3"]))
-STATUS_COLORS = {"To Do": "#e8eaed", "Clients To Do": "#e1d5f0", "In Progress": "#c9daf8",
+STATUS_COLORS = {"Done": "#b7e1cd", "To Do": "#e8eaed", "Clients To Do": "#e1d5f0", "In Progress": "#c9daf8",
                  "Open": "#fff2cc", "Reopened": "#f4c7c3", "Pending Customer Response": "#fce8b2"}
 
 
@@ -333,56 +346,109 @@ def todo_tabs(jira, gc, book):
             pass
 
 
-def open_ticket_rows(jira, issues, hours_label):
-    rows = [["Key", "Link", "Queue", "Request Type", "Summary", "Assignee", "Status",
-             f"{hours_label} Since", "Hours In Status", "Created", "Hours Since Created",
-             f"Over {SLA_HOURS}h?"]]
-    issues = sorted(issues, key=lambda i: (person(i["fields"].get("assignee")), status_since(i)))
-    for n, i in enumerate(issues, start=2):
-        f = i["fields"]
-        rows.append([i["key"], f"{jira.base}/browse/{i['key']}", queue_of(i), request_type(f),
-                     f["summary"], person(f.get("assignee")), f["status"]["name"],
-                     fmt(status_since(i)),
-                     Formula(f"=ROUND((NOW()-H{n})*24,1)"),
-                     fmt(parse_dt(f["created"])),
-                     Formula(f"=ROUND((NOW()-J{n})*24,1)"),
-                     Formula(f'=IF(I{n}>{SLA_HOURS},"OVERDUE","")')])
-    return rows
-
-
 def done_statuses(jira):
     r = jira.s.get(f"{jira.base}/rest/api/3/status", timeout=60)
     r.raise_for_status()
     return {st["name"] for st in r.json() if st["statusCategory"]["key"] == "done"}
 
 
-def productivity_rows(jira):
-    """Tickets moved into a Done-type status, credited to whoever moved them."""
-    done = done_statuses(jira)
-    since = datetime.now(TZ) - timedelta(days=PRODUCTIVITY_DAYS)
-    issues = jira.search(
-        f"project = {PROJECT} AND status changed DURING (-{PRODUCTIVITY_DAYS}d, now()) "
-        "AND statusCategory = Done",
-        FIELDS, expand="changelog")
-    per = defaultdict(lambda: {"n": 0, "hours": 0.0, "inst": 0})
-    for i in issues:
+def excluded(name):
+    return (name or "").strip().lower() in EXCLUDED_PEOPLE
+
+
+def done_info(issue, done, since):
+    """(when, who) of the latest move into a Done-type status after `since`, or None."""
+    moves = [(parse_dt(h["created"]), person(h.get("author")))
+             for h in (issue.get("changelog") or {}).get("histories", [])
+             for it in h.get("items", [])
+             if it.get("field") == "status" and it.get("toString") in done]
+    moves = [m for m in moves if m[0] >= since]
+    return max(moves) if moves else None
+
+
+STATE_ORDER = {"In Progress": 0, "Pending Customer Response": 0, "Done": 1}
+TICKET_HEADER = ["Key", "Link", "Queue", "Request Type", "Summary", "Person", "Status", "Jira Status",
+                 "Since", "Hours", f"Over {SLA_HOURS}h?", "Created"]
+
+
+def ticket_rows(jira, items, since_label):
+    """items: [(issue, state, since datetime, done datetime or None)].
+
+    Hours is live (counts up) for open tickets and fixed (created -> done) for done ones."""
+    rows = [[*TICKET_HEADER[:8], since_label, *TICKET_HEADER[9:]]]
+    items = sorted(items, key=lambda x: (person(x[0]["fields"].get("assignee")),
+                                         STATE_ORDER[x[1]], x[2]))
+    for n, (i, state, since, done_at) in enumerate(items, start=2):
         f = i["fields"]
-        moves = [(parse_dt(h["created"]), person(h.get("author")))
-                 for h in (i.get("changelog") or {}).get("histories", [])
-                 for it in h.get("items", [])
-                 if it.get("field") == "status" and it.get("toString") in done]
-        moves = [m for m in moves if m[0] >= since]
-        if not moves:
+        created = parse_dt(f["created"])
+        if done_at:
+            hours, over = round((done_at - created).total_seconds() / 3600, 1), ""
+        else:
+            hours = Formula(f"=ROUND((NOW()-I{n})*24,1)")
+            over = Formula(f'=IF(J{n}>{SLA_HOURS},"OVERDUE","")')
+        rows.append([i["key"], f"{jira.base}/browse/{i['key']}", queue_of(i), request_type(f),
+                     f["summary"], person(f.get("assignee")), state, f["status"]["name"],
+                     fmt(since), hours, over, fmt(created)])
+    return rows
+
+
+def productivity_rows(done_issues, done, since):
+    """Tickets moved into a Done-type status, credited to whoever moved them."""
+    per = defaultdict(lambda: {"n": 0, "hours": 0.0, "inst": 0})
+    for i in done_issues:
+        info = done_info(i, done, since)
+        if not info or excluded(info[1]):
             continue
-        when, who = max(moves)
+        when, who = info
         key = (when.strftime("%Y-%m-%d"), who)
         per[key]["n"] += 1
-        per[key]["hours"] += (when - parse_dt(f["created"])).total_seconds() / 3600
+        per[key]["hours"] += (when - parse_dt(i["fields"]["created"])).total_seconds() / 3600
         per[key]["inst"] += queue_of(i) == "Installment"
     rows = [["Date", "Person", "Tickets Resolved", "Of Which Installment", "Avg Hours To Resolve"]]
     for (day, who), v in sorted(per.items(), reverse=True):
         rows.append([day, who, v["n"], v["inst"], round(v["hours"] / v["n"], 1)])
     return rows
+
+
+def progress_book(jira, book):
+    """Sheet 2: In Progress (with Done), Pending Customer Response, Productivity."""
+    done = done_statuses(jira)
+    window = datetime.now(TZ) - timedelta(days=PRODUCTIVITY_DAYS)
+    quoted = ", ".join(f'"{x}"' for x in INPROGRESS_STATUSES + [CUSTOMER_STATUS])
+    open_issues = jira.search(f"project = {PROJECT} AND status in ({quoted})", FIELDS, expand="changelog")
+    done_issues = jira.search(
+        f"project = {PROJECT} AND status changed DURING (-{PRODUCTIVITY_DAYS}d, now()) AND statusCategory = Done",
+        FIELDS, expand="changelog")
+
+    first = datetime.fromisoformat(BO_FROM).replace(tzinfo=TZ)
+    mine, customer = [], []
+    for i in open_issues:
+        if excluded(person(i["fields"].get("assignee"))):
+            continue
+        name = i["fields"]["status"]["name"]
+        if name == CUSTOMER_STATUS:
+            customer.append((i, CUSTOMER_STATUS, status_since(i), None))
+        elif name in INPROGRESS_STATUSES:
+            mine.append((i, "In Progress", status_since(i), None))
+    for i in done_issues:
+        info = done_info(i, done, first)
+        if info and not excluded(person(i["fields"].get("assignee"))):
+            mine.append((i, "Done", info[0], info[0]))
+
+    specs = []
+    for title, items, label in [("In Progress", mine, "In Status / Done Since"),
+                                ("Pending Customer Response", customer, "Sent To Customer")]:
+        rows = ticket_rows(jira, items, label)
+        ws = write_tab(book, title, rows, {"Hours": "0.0"})
+        specs += [(ws, rows[0].index("Status"), STATUS_COLORS),
+                  (ws, rows[0].index(f"Over {SLA_HOURS}h?"), {"OVERDUE": "#ea9999"})]
+    write_tab(book, "Productivity", productivity_rows(done_issues, done, window))
+    apply_colors(book, specs)
+    for old in ("Pending Other Teams",):
+        try:
+            book.del_worksheet(book.worksheet(old))
+        except gspread.exceptions.WorksheetNotFound:
+            pass
 
 
 # ----------------------------------------------------------------- main
@@ -398,25 +464,10 @@ def main():
     drop_default_tab(book1)
     print("  ", book1.url)
 
-    print("Sheet 2: In Progress / Pending / Productivity")
+    print("Sheet 2: In Progress / Pending Customer / Productivity")
     book2 = gc.open_by_key(env("INPROGRESS_SHEET_ID"))
     set_timezone(book2)
-    open_issues = jira.search(f"project = {PROJECT} AND statusCategory != Done",
-                              FIELDS, expand="changelog")
-    mine = [i for i in open_issues if i["fields"]["status"]["name"] in BO_STATUSES]
-    customer = [i for i in open_issues if i["fields"]["status"]["name"] == CUSTOMER_STATUS]
-    other = [i for i in open_issues
-             if i["fields"]["status"]["name"] not in BO_STATUSES + [CUSTOMER_STATUS]]
-    specs = []
-    for title, issues_, label in [("In Progress", mine, "In Status"),
-                                  ("Pending Customer Response", customer, "Sent To Customer"),
-                                  ("Pending Other Teams", other, "In Status")]:
-        rows = open_ticket_rows(jira, issues_, label)
-        ws = write_tab(book2, title, rows)
-        specs += [(ws, rows[0].index("Status"), STATUS_COLORS),
-                  (ws, rows[0].index(f"Over {SLA_HOURS}h?"), {"OVERDUE": "#ea9999"})]
-    write_tab(book2, "Productivity", productivity_rows(jira))
-    apply_colors(book2, specs)
+    progress_book(jira, book2)
     drop_default_tab(book2)
     print("  ", book2.url)
     print("Done at", datetime.now(TZ).strftime("%Y-%m-%d %H:%M %Z"))
