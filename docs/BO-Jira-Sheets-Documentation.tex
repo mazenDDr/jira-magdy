@@ -347,6 +347,9 @@ is found by the ticket number, as in Section~\ref{sec:routing}.
   \item A \emph{Comment} typed by hand in this sheet is kept as long as the source sheet has no comment for that ticket.
     When the source sheet does have one, the source wins and replaces what was typed.
   \item \emph{Card \#} and \emph{Acc No} are stored as text, so numbers such as \code{0538} keep their leading zero.
+  \item \emph{Validation} is a dropdown that uses the same list of choices as the MDP sheet's own Validation column
+    (the program reads that list from the MDP sheet on every run). It also accepts values already in the cells.
+    All other copied columns, and every \emph{Comment} column, are plain text with no dropdown.
 \end{itemize}
 
 \subsection{The dropdowns}
