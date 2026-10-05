@@ -297,7 +297,8 @@ def rgb(hex_color):
 RESOLVED_COLORS = {"Solved": "#b7e1cd", "Pending for customer response": "#fce8b2", "On hold": "#f4c7c3"}
 TEAM_COLORS = dict(zip(TEAM, ["#c9daf8", "#d9d2e9", "#d0e0e3", "#ffe5d0", "#fff2cc",
                               "#d9ead3", "#ead1dc", "#cfe2f3"]))
-STATUS_COLORS = {"Done": "#b7e1cd", "To Do": "#e8eaed", "Clients To Do": "#e1d5f0", "In Progress": "#c9daf8",
+DONE_COLOR = "#b7e1cd"
+STATUS_COLORS = {"Done": DONE_COLOR, "To Do": "#e8eaed", "Clients To Do": "#e1d5f0", "In Progress": "#c9daf8",
                  "Open": "#fff2cc", "Reopened": "#f4c7c3", "Pending Customer Response": "#fce8b2"}
 
 
@@ -434,7 +435,7 @@ def q_todo():
 
 
 def q_backlog():
-    return (f'project = {PROJECT} AND created >= "{BO_FROM}"', ["status", REQUEST_TYPE_FIELD, "summary"])
+    return (f'project = {PROJECT} AND created >= "{BO_FROM}"', FIELDS)
 
 
 def q_open():
@@ -492,16 +493,22 @@ def bo_productivity_rows(header, tab_names):
 
 def todo_tabs(jira, book, ids_by_tab, data_by_tab, lists_by_tab):
     """Build the MDB / Installment / Product / Others tabs from the L1 board's to-do tickets."""
-    issues = jira.search(*q_todo())
-    print(f"  {len(issues)} to-do tickets since {BO_FROM}")
     header = ["Key", "Link", "Request Type", "Customer Ticket", "Status",
               "Assignee", "Created", "Updated", "Resolved"]
     # MDB gets the MDP sheet's case columns; every other tab gets a Comment column.
     extras = {name: list(SOURCE_COLUMNS["MDB"]) if name == "MDB" else ["Comment"] for name in [*SOURCES, "Others"]}
     tabs = {name: [header + extras[name]] for name in extras}
-    picks = read_picks(book, list(tabs), ["Resolved", "Assignee", *KEEP_PICKS])  # kept even if a ticket moves tab
+    picks = read_picks(book, list(tabs), ["Key", "Resolved", "Assignee", *KEEP_PICKS])  # kept even if a ticket moves tab
     choices = picks["Resolved"]
     assignees = {k: v for k, v in picks["Assignee"].items() if v in TEAM}
+    # A ticket stays once it has been listed, even after Jira moves it out of To Do or closes it, so it can be tracked
+    # again later. Its Status column keeps following Jira.
+    listed = set(picks["Key"])
+    everything = jira.search(*q_backlog())
+    issues = sorted((i for i in everything if i["fields"]["status"]["name"] in BO_TODO_STATUSES or i["key"] in listed),
+                    key=lambda i: i["fields"]["created"], reverse=True)
+    todo = sum(i["fields"]["status"]["name"] in BO_TODO_STATUSES for i in everything)
+    print(f"  {todo} to-do tickets since {BO_FROM}, {len(issues) - todo} kept from earlier runs")
     conflicts = 0
     for i in issues:
         f = i["fields"]
@@ -533,9 +540,12 @@ def todo_tabs(jira, book, ids_by_tab, data_by_tab, lists_by_tab):
         if tab == "MDB":
             dropdowns["Project"], loose = PROJECT_CHOICES, loose + ("Project",)
         ws = write_tab(book, tab, rows, dropdowns=dropdowns, loose=loose)
+        shown = {r[header.index("Status")] for r in rows[1:]}
+        colours = {name: DONE_COLOR for name in done_statuses(jira)}
+        colours.update(STATUS_COLORS)
         specs += [(ws, header.index("Resolved"), RESOLVED_COLORS),
                   (ws, header.index("Assignee"), TEAM_COLORS),
-                  (ws, header.index("Status"), STATUS_COLORS)]
+                  (ws, header.index("Status"), {k: v for k, v in colours.items() if k in shown})]
     specs += backlog_tab(jira, book)
     write_tab(book, "Productivity", bo_productivity_rows(header, list(tabs)), filter_cols=0)
     flush(book)
@@ -619,9 +629,18 @@ def team_rows(jira, items, choices):
                 Formula(f'="In Progress: "&COUNTIF({status_col}2:{status_col},"In Progress")'),
                 Formula(f'="Done: "&COUNTIF({status_col}2:{status_col},"Done")')]
     rows = [header + counters]
-    items = sorted(items, key=lambda x: (person(x[0]["fields"].get("assignee")), x[1]))
-    for n, (i, since) in enumerate(items, start=2):
+    oldest = datetime.min.replace(tzinfo=TZ)
+    items = sorted(items, key=lambda x: (person(x[0]["fields"].get("assignee")), len(x) > 2, x[1] or oldest))
+    for n, item in enumerate(items, start=2):
+        i, since = item[0], item[1]
         f = i["fields"]
+        if len(item) > 2:  # closed in Jira after the team marked it Done: kept, with the counters stopped
+            created = parse_dt(f["created"])
+            span = (lambda days: round((since - created).total_seconds() / days, 1) if since else "")
+            rows.append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f), f["summary"],
+                         person(f.get("assignee")), "Done", f["status"]["name"], fmt(since), span(3600),
+                         fmt(created), span(86400), "", "Closed in Jira", ""])
+            continue
         rows.append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f), f["summary"],
                      person(f.get("assignee")), choices.get(i["key"], "In Progress"), f["status"]["name"],
                      fmt(since), Formula(f"=ROUND((NOW()-{since_col}{n})*24,1)"), fmt(parse_dt(f["created"])),
@@ -750,6 +769,15 @@ def progress_book(jira, book, ids_by_tab, log):
         elif name in INPROGRESS_STATUSES:
             by_tab[route(i, ids_by_tab)].append((i, status_since(i)))
             counts[who]["done" if choices.get(i["key"]) == "Done" else "progress"] += 1
+    # Tickets the team marked Done stay on the sheet after Jira closes them. They are already counted as Done
+    # through the Done Log below, so they are not counted again here.
+    open_keys = {i["key"] for i in open_issues}
+    kept = sorted(k for k, v in choices.items() if v == "Done" and k not in open_keys)
+    for start in range(0, len(kept), 100):
+        for i in jira.search(f"key in ({', '.join(kept[start:start + 100])})", FIELDS):
+            if not excluded(person(i["fields"].get("assignee"))):
+                closed = entries.get(i["key"])
+                by_tab[route(i, ids_by_tab)].append((i, closed[0] if closed else None, True))
     for when, who in entries.values():  # closed in Jira: credited to whoever moved the ticket
         if not excluded(who):
             counts[who]["done"] += 1
@@ -792,7 +820,7 @@ def main():
     log = load_done_log(book2)
 
     # Start every Jira query now so they run while the source sheets are being read.
-    for query in (q_todo(), q_backlog(), q_open()):
+    for query in (q_backlog(), q_open()):
         jira.prefetch(*query)
     hours = done_plan(log[1])
     jira.prefetch(*q_done(f"-{PRODUCTIVITY_DAYS}d" if hours is None else f"-{hours}h"))
