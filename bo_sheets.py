@@ -13,6 +13,7 @@ Sheet 2 (INPROGRESS_SHEET_ID) tabs:
 Config comes from environment variables; see .env.example. Run it again to refresh.
 """
 
+import faulthandler
 import json
 import os
 import re
@@ -195,7 +196,9 @@ def google():
     creds = Credentials.from_service_account_info(
         info, scopes=["https://www.googleapis.com/auth/spreadsheets",
                       "https://www.googleapis.com/auth/drive"])
-    return gspread.authorize(creds)
+    client = gspread.authorize(creds)
+    client.set_timeout(60)  # a stuck Google call must fail, not hang the whole run
+    return client
 
 
 class Formula(str):
@@ -861,4 +864,7 @@ def main_with_retry(attempts=4):
 
 
 if __name__ == "__main__":
+    # A normal run takes about 30 seconds. If something hangs, print where and stop after 4 minutes
+    # instead of waiting for GitHub to cancel the job (a hung run once used 15 billed minutes).
+    faulthandler.dump_traceback_later(240, exit=True)
     main_with_retry()
