@@ -42,7 +42,7 @@ Resolution, Labels, Created, Updated, Due Date, Description.
 
 ## Automatic refresh
 
-`.github/workflows/sync.yml` runs `bo_sheets.py`. It must be on the repo's default branch, and the repo needs two
+`.github/workflows/sync.yml` runs `bo_sheets.py` when started by the timer below or by hand from the Actions tab. It must be on the repo's default branch, and the repo needs two
 secrets (Settings -> Secrets and variables -> Actions): `JIRA_API_TOKEN` and `GOOGLE_SERVICE_ACCOUNT_JSON` (the full
 contents of the key file).
 
@@ -58,5 +58,10 @@ trigger to start the workflow instead:
 4. Triggers (clock icon) -> Add trigger -> function `triggerSync`, time-driven, minutes timer, **every 30 minutes**.
 5. Run `triggerSync` once by hand to authorise it and check the Actions tab shows a new run.
 
-The script runs every 30 minutes by day (09:00-22:59 Cairo) and once an hour overnight, and Google handles daylight saving.
-Once this works, delete the `schedule:` block in the workflow so runs are not doubled.
+The script runs every 30 minutes by day (09:00-22:59 Cairo) and every 2 hours overnight, and Google handles daylight saving.
+The workflow has no GitHub `schedule:` of its own, so each refresh runs once.
+
+### Run time and free minutes
+
+A run takes about 15-25 seconds, under GitHub's one billed minute. The In Progress sheet keeps a hidden **Done Log** tab
+(who closed which ticket) so each run only asks Jira about recent changes; delete that tab to rebuild it from the last 30 days.

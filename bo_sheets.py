@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -76,13 +77,18 @@ def env(name):
 # ---------------------------------------------------------------- Jira
 
 class Jira:
+    """Jira Cloud search. prefetch() starts a query in the background; search() returns its result."""
+
     def __init__(self):
         self.base = env("JIRA_BASE_URL").rstrip("/")
-        self.s = requests.Session()
-        self.s.auth = (env("JIRA_EMAIL"), env("JIRA_API_TOKEN"))
-        self.s.headers["Accept"] = "application/json"
+        self.auth = (env("JIRA_EMAIL"), env("JIRA_API_TOKEN"))
+        self._pool = ThreadPoolExecutor(6)
+        self._futures = {}
 
-    def search(self, jql, fields, expand=None):
+    def _fetch(self, jql, fields, expand):
+        s = requests.Session()  # one session per query so queries can run side by side
+        s.auth = self.auth
+        s.headers["Accept"] = "application/json"
         out, token = [], None
         while True:
             params = {"jql": jql, "fields": ",".join(fields), "maxResults": 100}
@@ -90,14 +96,32 @@ class Jira:
                 params["expand"] = expand
             if token:
                 params["nextPageToken"] = token
-            r = self.s.get(f"{self.base}/rest/api/3/search/jql", params=params, timeout=90)
+            r = s.get(f"{self.base}/rest/api/3/search/jql", params=params, timeout=90)
             if r.status_code != 200:
-                sys.exit(f"Jira error {r.status_code}: {r.text[:400]}")
+                raise RuntimeError(f"Jira error {r.status_code}: {r.text[:400]}")
             data = r.json()
             out += data.get("issues", [])
             token = data.get("nextPageToken")
             if not token:
                 return out
+
+    def prefetch(self, jql, fields, expand=None):
+        key = (jql, tuple(fields), expand)
+        if key not in self._futures:
+            self._futures[key] = self._pool.submit(self._fetch, jql, fields, expand)
+
+    def search(self, jql, fields, expand=None):
+        key = (jql, tuple(fields), expand)
+        if key in self._futures:
+            return self._futures[key].result()
+        return self._fetch(jql, fields, expand)
+
+    def get(self, path):
+        s = requests.Session()
+        s.auth = self.auth
+        r = s.get(f"{self.base}{path}", headers={"Accept": "application/json"}, timeout=60)
+        r.raise_for_status()
+        return r.json()
 
 
 def parse_dt(value):
@@ -191,18 +215,17 @@ def set_order(book, titles):
         "properties": {"sheetId": cache[t].id, "index": n}, "fields": "index"}} for n, t in enumerate(titles)]})
 
 
-def write_tab(book, title, rows, number_formats=None, dropdowns=None):
-    """Replace a tab's contents. Layout work (size, header, formats, dropdowns, filter) goes in one batch."""
+def write_tab(book, title, rows, number_formats=None, dropdowns=None, hidden=False):
+    """Queue a tab's new contents. flush() sends every queued tab to Google in three calls."""
     ncols, nrows = len(rows[0]), len(rows)
     ws = get_ws(book, title, ncols)
-    ws.clear()
     sheet = {"sheetId": ws.id}
     cell_range = lambda col: {**sheet, "startRowIndex": 1, "startColumnIndex": col, "endColumnIndex": col + 1}
     reqs = [
-        {"updateSheetProperties": {"properties": {**sheet, "gridProperties": {
+        {"updateSheetProperties": {"properties": {**sheet, "hidden": hidden, "gridProperties": {
             "rowCount": max(nrows, 2), "columnCount": ncols, "frozenRowCount": 1}},
-            "fields": "gridProperties(rowCount,columnCount,frozenRowCount)"}},
-        # clear() keeps old cell formats; reset them so a changed layout can't show numbers as dates.
+            "fields": "hidden,gridProperties(rowCount,columnCount,frozenRowCount)"}},
+        # clearing values keeps old cell formats; reset them so a changed layout can't show numbers as dates.
         {"repeatCell": {"range": sheet, "cell": {"userEnteredFormat": {}},
                         "fields": "userEnteredFormat.numberFormat"}},
         {"repeatCell": {"range": {**sheet, "startRowIndex": 0, "endRowIndex": 1},
@@ -220,12 +243,22 @@ def write_tab(book, title, rows, number_formats=None, dropdowns=None):
         reqs.append({"setDataValidation": {"range": cell_range(rows[0].index(header)), "rule": {
             "condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": c} for c in choices]},
             "showCustomUi": True, "strict": True}}})
-    book.batch_update({"requests": reqs})
     body = [rows[0]] + [[safe(c) for c in r] for r in rows[1:]]
-    for start in range(0, len(body), 5000):
-        ws.update(body[start:start + 5000], f"A{start + 1}", value_input_option="USER_ENTERED")
-    print(f"  '{title}': {nrows - 1} rows")
+    book.__dict__.setdefault("_pending", []).append({"title": title, "reqs": reqs, "rows": body})
     return ws
+
+
+def flush(book):
+    """Clear, lay out and fill every queued tab: three Google calls however many tabs there are."""
+    pending = book.__dict__.pop("_pending", [])
+    if not pending:
+        return
+    book.values_batch_clear(body={"ranges": [f"'{p['title']}'" for p in pending]})
+    book.batch_update({"requests": [r for p in pending for r in p["reqs"]]})
+    book.values_batch_update({"valueInputOption": "USER_ENTERED", "data": [
+        {"range": f"'{p['title']}'!A1", "values": p["rows"]} for p in pending]})
+    for p in pending:
+        print(f"  '{p['title']}': {len(p['rows']) - 1} rows")
 
 
 def set_timezone(spreadsheet):
@@ -332,10 +365,24 @@ def route(issue, ids_by_tab):
     return "Others"
 
 
+def q_todo():
+    statuses = ", ".join(f'"{x}"' for x in BO_TODO_STATUSES)
+    return (f'project = {PROJECT} AND status in ({statuses}) AND created >= "{BO_FROM}" ORDER BY created DESC', FIELDS)
+
+
+def q_backlog():
+    return (f'project = {PROJECT} AND created >= "{BO_FROM}"', ["status", REQUEST_TYPE_FIELD, "summary"])
+
+
+def q_open():
+    quoted = ", ".join(f'"{x}"' for x in INPROGRESS_STATUSES + [CUSTOMER_STATUS])
+    return (f"project = {PROJECT} AND status in ({quoted})", FIELDS, "changelog")
+
+
 def backlog_tab(jira, book):
     """Contact-type table (Closed / Pending / Untouched) over everything that arrived since BO_FROM."""
     done = done_statuses(jira)
-    issues = jira.search(f'project = {PROJECT} AND created >= "{BO_FROM}"', ["status", REQUEST_TYPE_FIELD, "summary"])
+    issues = jira.search(*q_backlog())
     per = defaultdict(lambda: {"Closed": 0, "Pending": 0, "Untouched": 0})
     for i in issues:
         f = i["fields"]
@@ -351,10 +398,7 @@ def backlog_tab(jira, book):
 
 def todo_tabs(jira, book, ids_by_tab):
     """Build the MDB / Installment / Product / Others tabs from the L1 board's to-do tickets."""
-    statuses = ", ".join(f'"{x}"' for x in BO_TODO_STATUSES)
-    issues = jira.search(
-        f'project = {PROJECT} AND status in ({statuses}) AND created >= "{BO_FROM}" ORDER BY created DESC',
-        FIELDS)
+    issues = jira.search(*q_todo())
     print(f"  {len(issues)} to-do tickets since {BO_FROM}")
     header = ["Key", "Link", "Request Type", "Customer Ticket", "Status",
               "Assignee", "Created", "Updated", "Resolved"]
@@ -381,6 +425,7 @@ def todo_tabs(jira, book, ids_by_tab):
                   (ws, header.index("Assignee"), TEAM_COLORS),
                   (ws, header.index("Status"), STATUS_COLORS)]
     specs += backlog_tab(jira, book)
+    flush(book)
     apply_colors(book, specs)
     if conflicts:
         print(f"  {conflicts} ticket(s) were routed by keyword to a different tab than a source sheet lists")
@@ -389,9 +434,9 @@ def todo_tabs(jira, book, ids_by_tab):
 
 
 def done_statuses(jira):
-    r = jira.s.get(f"{jira.base}/rest/api/3/status", timeout=60)
-    r.raise_for_status()
-    return {st["name"] for st in r.json() if st["statusCategory"]["key"] == "done"}
+    if not hasattr(jira, "_done"):
+        jira._done = {st["name"] for st in jira.get("/rest/api/3/status") if st["statusCategory"]["key"] == "done"}
+    return jira._done
 
 
 def excluded(name):
@@ -461,15 +506,75 @@ def productivity_rows(counts):
     return rows
 
 
-def progress_book(jira, book, ids_by_tab):
-    """Sheet 2: MDB / Installment / Product / Others (in-progress tickets), Pending Customer Response, Productivity."""
+DONE_LOG_TAB = "Done Log"
+
+
+def done_plan(last_sync):
+    """None = rebuild the log from scratch, else how many hours back to look for changes."""
+    if last_sync is None:
+        return None
+    age = datetime.now(TZ) - last_sync
+    if age > timedelta(days=PRODUCTIVITY_DAYS - 2):
+        return None
+    return max(6, int(age.total_seconds() // 3600) + 4)
+
+
+def q_done(window):
+    return (f"project = {PROJECT} AND status changed DURING ({window}, now()) AND statusCategory = Done",
+            FIELDS, "changelog")
+
+
+def q_reopened(hours):
+    return (f"project = {PROJECT} AND status changed DURING (-{hours}h, now()) AND statusCategory != Done", ["status"])
+
+
+def load_done_log(book):
+    """The saved history of who closed what: ({ticket: (when, who)}, time of last sync)."""
+    cache = book.__dict__.setdefault("_ws_cache", {w.title: w for w in book.worksheets()})
+    if DONE_LOG_TAB not in cache:
+        return {}, None
+    values = book.values_batch_get([f"'{DONE_LOG_TAB}'"])["valueRanges"][0].get("values", [])
+    entries, last_sync = {}, None
+    for row in values[1:]:
+        if len(row) > 4 and row[4]:
+            last_sync = datetime.fromtimestamp(int(row[4]), TZ)
+        if row and row[0] and len(row) > 2 and row[1]:
+            entries[row[0]] = (datetime.fromtimestamp(int(row[1]), TZ), row[2])
+    return entries, last_sync
+
+
+def refresh_done_log(jira, entries, last_sync, window):
+    """Add what was closed since the last sync. Only the first run needs the full 30 days from Jira."""
     done = done_statuses(jira)
+    hours = done_plan(last_sync)
+    if hours is None:
+        entries, closed = {}, jira.search(*q_done(f"-{PRODUCTIVITY_DAYS}d"))
+    else:
+        closed = jira.search(*q_done(f"-{hours}h"))
+        for i in jira.search(*q_reopened(hours)):  # opened again since: no longer counts as done
+            entries.pop(i["key"], None)
+    for i in closed:
+        info = done_info(i, done, window)
+        if info:
+            entries[i["key"]] = info
+    return {k: v for k, v in entries.items() if v[0] >= window}
+
+
+def done_log_rows(entries):
+    now = int(datetime.now(TZ).timestamp())
+    rows = [["Key", "Done At", "By", "", "Last Sync"]]
+    for n, (key, (when, who)) in enumerate(sorted(entries.items())):
+        rows.append([key, int(when.timestamp()), who, "", now if n == 0 else ""])
+    if len(rows) == 1:
+        rows.append(["", "", "", "", now])
+    return rows
+
+
+def progress_book(jira, book, ids_by_tab, log):
+    """Sheet 2: MDB / Installment / Product / Others (in-progress tickets), Pending Customer Response, Productivity."""
     window = datetime.now(TZ) - timedelta(days=PRODUCTIVITY_DAYS)
-    quoted = ", ".join(f'"{x}"' for x in INPROGRESS_STATUSES + [CUSTOMER_STATUS])
-    open_issues = jira.search(f"project = {PROJECT} AND status in ({quoted})", FIELDS, expand="changelog")
-    done_issues = jira.search(
-        f"project = {PROJECT} AND status changed DURING (-{PRODUCTIVITY_DAYS}d, now()) AND statusCategory = Done",
-        FIELDS, expand="changelog")
+    open_issues = jira.search(*q_open())
+    entries = refresh_done_log(jira, *log, window)
 
     team_tabs = [*SOURCES, "Others"]
     # In Progress / Done picks made in the sheet earlier
@@ -489,10 +594,9 @@ def progress_book(jira, book, ids_by_tab):
         elif name in INPROGRESS_STATUSES:
             by_tab[route(i, ids_by_tab)].append((i, status_since(i)))
             counts[who]["done" if choices.get(i["key"]) == "Done" else "progress"] += 1
-    for i in done_issues:  # closed in Jira: credited to whoever moved the ticket
-        info = done_info(i, done, window)
-        if info and not excluded(info[1]):
-            counts[info[1]]["done"] += 1
+    for when, who in entries.values():  # closed in Jira: credited to whoever moved the ticket
+        if not excluded(who):
+            counts[who]["done"] += 1
     counts.pop("Unassigned", None)
 
     specs = []
@@ -509,33 +613,49 @@ def progress_book(jira, book, ids_by_tab):
     rows = productivity_rows(counts)
     ws = write_tab(book, "Productivity", rows)
     specs += [(ws, 2, "#f6b26b"), (ws, 3, "#57bb8a"), (ws, 4, "#ffd966")]
+    write_tab(book, DONE_LOG_TAB, done_log_rows(entries), hidden=True)  # kept for the next run, hidden from view
+    flush(book)
     apply_colors(book, specs)
     for old in ("In Progress", "Pending Other Teams"):
         delete_tab(book, old)
-    set_order(book, [*team_tabs, "Pending Customer Response", "Productivity"])
+    set_order(book, [*team_tabs, "Pending Customer Response", "Productivity", DONE_LOG_TAB])
 
 
 # ----------------------------------------------------------------- main
 
 def main():
+    started = time.time()
     jira = Jira()
     gc = google()
+    book1 = gc.open_by_key(env("BO_SHEET_ID"))
+    book2 = gc.open_by_key(env("INPROGRESS_SHEET_ID"))
+    for book in (book1, book2):
+        if book.timezone != TZ.key:
+            set_timezone(book)
+    log = load_done_log(book2)
+
+    # Start every Jira query now so they run while the source sheets are being read.
+    for query in (q_todo(), q_backlog(), q_open()):
+        jira.prefetch(*query)
+    hours = done_plan(log[1])
+    jira.prefetch(*q_done(f"-{PRODUCTIVITY_DAYS}d" if hours is None else f"-{hours}h"))
+    if hours is not None:
+        jira.prefetch(*q_reopened(hours))
+    jira._pool.submit(done_statuses, jira)
+    with ThreadPoolExecutor(len(SOURCES)) as pool:  # each source sheet gets its own Google client
+        futures = {tab: pool.submit(source_ticket_ids, google(), sid, st) for tab, (sid, st) in SOURCES.items()}
+        ids_by_tab = {tab: f.result() for tab, f in futures.items()}
 
     print("Sheet 1: BO to-do tickets by team")
-    book1 = gc.open_by_key(env("BO_SHEET_ID"))
-    set_timezone(book1)
-    ids_by_tab = {tab: source_ticket_ids(gc, sid, source_tab) for tab, (sid, source_tab) in SOURCES.items()}
     todo_tabs(jira, book1, ids_by_tab)
     drop_default_tab(book1)
     print("  ", book1.url)
 
     print("Sheet 2: team tabs / Pending Customer / Productivity")
-    book2 = gc.open_by_key(env("INPROGRESS_SHEET_ID"))
-    set_timezone(book2)
-    progress_book(jira, book2, ids_by_tab)
+    progress_book(jira, book2, ids_by_tab, log)
     drop_default_tab(book2)
     print("  ", book2.url)
-    print("Done at", datetime.now(TZ).strftime("%Y-%m-%d %H:%M %Z"))
+    print(f"Done at {datetime.now(TZ).strftime('%Y-%m-%d %H:%M %Z')} in {time.time() - started:.0f}s")
 
 
 def main_with_retry(attempts=4):
