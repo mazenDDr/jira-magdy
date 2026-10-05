@@ -1,12 +1,7 @@
 name: Sync Jira to Google Sheets
 
 on:
-  schedule:
-    # Backup schedule. GitHub treats schedules as best-effort and drops or delays runs that start on
-    # :00 and :30, so these use odd minutes. The reliable trigger is apps-script/trigger.gs (see README).
-    # Cairo is UTC+3 until the end of October 2026, then UTC+2 (shift the hours by one).
-    - cron: "7,37 6-19 * * *"     # day: about every 30 min, 09:07-22:37 Cairo
-    - cron: "17 20-23,0-5 * * *"  # night: hourly, 23:17-08:17 Cairo
+  # Started by the Google Apps Script timer (apps-script/trigger.gs) or by hand from the Actions tab.
   workflow_dispatch:
 
 concurrency:
