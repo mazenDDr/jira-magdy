@@ -40,8 +40,23 @@ Resolution, Labels, Created, Updated, Due Date, Description.
   customer). People in `EXCLUDED_PEOPLE` are left out. Hours and day counters are live formulas.
 - **BO Tickets** also has a **Backlog** tab: Closed / Pending / Untouched counts per contact type since `BO_FROM`.
 
-## Automatic refresh (every 30 minutes from 09:00 to 22:30 Cairo time and every hour from 23:00 to 08:00)
+## Automatic refresh
 
-`.github/workflows/sync.yml` runs `bo_sheets.py` every 30 minutes from 09:00 to 22:30 Cairo time and every hour from 23:00 to 08:00. It must be on the repo's default
-branch, and the repo needs two secrets (Settings → Secrets and variables → Actions):
-`JIRA_API_TOKEN` and `GOOGLE_SERVICE_ACCOUNT_JSON` (the full contents of the key file).
+`.github/workflows/sync.yml` runs `bo_sheets.py`. It must be on the repo's default branch, and the repo needs two
+secrets (Settings -> Secrets and variables -> Actions): `JIRA_API_TOKEN` and `GOOGLE_SERVICE_ACCOUNT_JSON` (the full
+contents of the key file).
+
+### Reliable refresh (recommended)
+
+GitHub's own `schedule:` is best-effort and skips runs, so the sheets can go hours without updating. Use a Google time
+trigger to start the workflow instead:
+
+1. Create a fine-grained GitHub token: Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens.
+   Repository access: only `jira-magdy`. Permissions: **Actions: Read and write** (nothing else).
+2. Open the BO sheet -> Extensions -> Apps Script. Paste in `apps-script/trigger.gs`.
+3. Project Settings (gear) -> Script properties -> add `GITHUB_TOKEN` with the token.
+4. Triggers (clock icon) -> Add trigger -> function `triggerSync`, time-driven, minutes timer, **every 30 minutes**.
+5. Run `triggerSync` once by hand to authorise it and check the Actions tab shows a new run.
+
+The script runs every 30 minutes by day (09:00-22:59 Cairo) and once an hour overnight, and Google handles daylight saving.
+Once this works, delete the `schedule:` block in the workflow so runs are not doubled.
