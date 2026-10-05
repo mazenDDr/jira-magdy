@@ -368,27 +368,42 @@ def done_info(issue, done, since):
 
 STATE_ORDER = {"In Progress": 0, "Pending Customer Response": 0, "Done": 1}
 TICKET_HEADER = ["Key", "Link", "Queue", "Request Type", "Summary", "Person", "Status", "Jira Status",
-                 "Since", "Hours", f"Over {SLA_HOURS}h?", "Created"]
+                 "Since", "Hours", f"Over {SLA_HOURS}h?", "Created", "Days Since Arrived", "Days In Progress"]
 
 
-def ticket_rows(jira, items, since_label):
+def progress_start(issue, before):
+    """When the ticket last moved into an In Progress status before `before` (else when it was created)."""
+    starts = [parse_dt(h["created"])
+              for h in (issue.get("changelog") or {}).get("histories", [])
+              for it in h.get("items", [])
+              if it.get("field") == "status" and it.get("toString") in INPROGRESS_STATUSES
+              and parse_dt(h["created"]) <= before]
+    return max(starts) if starts else parse_dt(issue["fields"]["created"])
+
+
+def ticket_rows(jira, items, since_label, progress_label="Days In Progress"):
     """items: [(issue, state, since datetime, done datetime or None)].
 
     Hours is live (counts up) for open tickets and fixed (created -> done) for done ones."""
-    rows = [[*TICKET_HEADER[:8], since_label, *TICKET_HEADER[9:]]]
+    rows = [[*TICKET_HEADER[:8], since_label, *TICKET_HEADER[9:13], progress_label]]
     items = sorted(items, key=lambda x: (person(x[0]["fields"].get("assignee")),
                                          STATE_ORDER[x[1]], x[2]))
     for n, (i, state, since, done_at) in enumerate(items, start=2):
         f = i["fields"]
         created = parse_dt(f["created"])
         if done_at:
+            # Finished: the counters stop at the moment it was done.
             hours, over = round((done_at - created).total_seconds() / 3600, 1), ""
+            arrived = round((done_at - created).total_seconds() / 86400, 1)
+            in_progress = round((done_at - progress_start(i, done_at)).total_seconds() / 86400, 1)
         else:
             hours = Formula(f"=ROUND((NOW()-I{n})*24,1)")
             over = Formula(f'=IF(J{n}>{SLA_HOURS},"OVERDUE","")')
+            arrived = Formula(f"=ROUND(NOW()-L{n},1)")      # keeps counting up
+            in_progress = Formula(f"=ROUND(NOW()-I{n},1)")
         rows.append([i["key"], f"{jira.base}/browse/{i['key']}", queue_of(i), request_type(f),
                      f["summary"], person(f.get("assignee")), state, f["status"]["name"],
-                     fmt(since), hours, over, fmt(created)])
+                     fmt(since), hours, over, fmt(created), arrived, in_progress])
     return rows
 
 
@@ -436,10 +451,11 @@ def progress_book(jira, book):
             mine.append((i, "Done", info[0], info[0]))
 
     specs = []
-    for title, items, label in [("In Progress", mine, "In Status / Done Since"),
-                                ("Pending Customer Response", customer, "Sent To Customer")]:
-        rows = ticket_rows(jira, items, label)
-        ws = write_tab(book, title, rows, {"Hours": "0.0"})
+    for title, items, label, days_label in [
+            ("In Progress", mine, "In Status / Done Since", "Days In Progress"),
+            ("Pending Customer Response", customer, "Sent To Customer", "Days Waiting For Customer")]:
+        rows = ticket_rows(jira, items, label, days_label)
+        ws = write_tab(book, title, rows, {"Hours": "0.0", "Days Since Arrived": "0.0", days_label: "0.0"})
         specs += [(ws, rows[0].index("Status"), STATUS_COLORS),
                   (ws, rows[0].index(f"Over {SLA_HOURS}h?"), {"OVERDUE": "#ea9999"})]
     write_tab(book, "Productivity", productivity_rows(done_issues, done, window))
