@@ -63,6 +63,16 @@ INSTALLMENT_WORDS = [w.strip().lower() for w in os.environ.get("INSTALLMENT_KEYW
 MDB_WORDS = [w.strip().lower() for w in os.environ.get("MDB_KEYWORDS", "").split(",") if w.strip()]
 
 REQUEST_TYPE_FIELD = "customfield_11163"
+RELATED_FIELD = "customfield_11301"  # Jira "Related Tickets Status", e.g. "Operations (OPS-1934): Pending CS |"
+# Columns copied from each source sheet into the BO tabs: {column on our tab: header in the source sheet}.
+SOURCE_COLUMNS = {
+    "MDB": {"Card #": "card #", "Acc No": "acc no", "Description": "descrebtion", "Amount": "amount",
+            "Disputed Amount If Partial": "disputed amount if partial", "Project": "project",
+            "BO Owner": "bo owner", "Validation": "validation"},
+    "Installment": {"Comment": "first comment"},
+    "Product": {"Comment": "comment"},
+}
+TEXT_COLUMNS = {"Card #", "Acc No"}  # keep leading zeros
 FIELDS = ["summary", "status", "assignee", "reporter", "created", "updated",
           "resolutiondate", REQUEST_TYPE_FIELD]
 
@@ -321,18 +331,39 @@ def drop_default_tab(spreadsheet):
 TICKET_ID = re.compile(r"\b((?:L1|CCS|CC2?)-\d+)\b", re.I)
 
 
-def source_ticket_ids(gc, sheet_id, tab):
-    """Every ticket number (L1-1234, CCS-1234, CC2-1234) mentioned in a source sheet."""
+def norm(text):
+    return " ".join((text or "").lower().split())
+
+
+def read_source(gc, sheet_id, tab, columns):
+    """Read a source sheet once. Returns (every ticket number mentioned, {ticket: {our column: value}})."""
     book = gc.open_by_key(sheet_id)
-    found = set()
+    found, data = set(), {}
     for ws in book.worksheets():
         if tab and ws.title.strip().lower() != tab.strip().lower():
             continue
-        for row in ws.get_all_values():
-            for cell in row:
+        values = ws.get_all_values()
+        counts = {}
+        for row in values:
+            for c, cell in enumerate(row):
                 if len(cell) <= 40:
                     found.update(m.upper() for m in TICKET_ID.findall(cell))
-    return found
+                    if TICKET_ID.fullmatch(cell.strip()):
+                        counts[c] = counts.get(c, 0) + 1
+        if not columns or not values:
+            continue
+        header = [norm(h) for h in values[0]]
+        wanted = {label: header.index(h) for label, h in columns.items() if h in header}
+        top = max(counts.values(), default=0)
+        key_cols = [c for c, n in counts.items() if n >= 50 and n >= 0.1 * top]
+        for row in values[1:]:
+            cells = {label: row[c].strip() for label, c in wanted.items() if c < len(row) and row[c].strip()}
+            if not cells:
+                continue
+            for c in key_cols:
+                if c < len(row) and TICKET_ID.fullmatch(row[c].strip()):
+                    data.setdefault(row[c].strip().upper(), {}).update(cells)  # a later row fills or updates
+    return found, data
 
 
 def read_picks(book, titles, columns):
@@ -379,7 +410,7 @@ def q_backlog():
 
 def q_open():
     quoted = ", ".join(f'"{x}"' for x in INPROGRESS_STATUSES + [CUSTOMER_STATUS])
-    return (f"project = {PROJECT} AND status in ({quoted})", FIELDS, "changelog")
+    return (f"project = {PROJECT} AND status in ({quoted})", FIELDS + [RELATED_FIELD], "changelog")
 
 
 def backlog_tab(jira, book):
@@ -430,14 +461,16 @@ def bo_productivity_rows(header, tab_names):
     return rows
 
 
-def todo_tabs(jira, book, ids_by_tab):
+def todo_tabs(jira, book, ids_by_tab, data_by_tab):
     """Build the MDB / Installment / Product / Others tabs from the L1 board's to-do tickets."""
     issues = jira.search(*q_todo())
     print(f"  {len(issues)} to-do tickets since {BO_FROM}")
     header = ["Key", "Link", "Request Type", "Customer Ticket", "Status",
               "Assignee", "Created", "Updated", "Resolved"]
-    tabs = {name: [header] for name in [*SOURCES, "Others"]}
-    picks = read_picks(book, list(tabs), ["Resolved", "Assignee"])  # kept even if a ticket moves tab
+    # MDB gets the MDP sheet's case columns; every other tab gets a Comment column.
+    extras = {name: list(SOURCE_COLUMNS["MDB"]) if name == "MDB" else ["Comment"] for name in [*SOURCES, "Others"]}
+    tabs = {name: [header + extras[name]] for name in extras}
+    picks = read_picks(book, list(tabs), ["Resolved", "Assignee", "Comment"])  # kept even if a ticket moves tab
     choices = picks["Resolved"]
     assignees = {k: v for k, v in picks["Assignee"].items() if v in TEAM}
     conflicts = 0
@@ -448,10 +481,17 @@ def todo_tabs(jira, book, ids_by_tab):
                      if i["key"] in ids or customer_ref(f["summary"]) in ids]
         conflicts += bool(in_sheets) and tab not in in_sheets
         who = assignees.get(i["key"], "")
+        ref = customer_ref(f["summary"])
+        found = data_by_tab.get(tab, {})
+        info = found.get(i["key"].upper()) or found.get(ref.upper()) or {}
+        extra = []
+        for label in extras[tab]:
+            value = info.get(label) or (picks["Comment"].get(i["key"], "") if label == "Comment" else "")
+            extra.append("'" + value if value and label in TEXT_COLUMNS else value)
         tabs[tab].append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f),
-                          customer_ref(f["summary"]), f["status"]["name"], who,
+                          ref, f["status"]["name"], who,
                           fmt(parse_dt(f["created"])), fmt(parse_dt(f["updated"])),
-                          choices.get(i["key"], "")])
+                          choices.get(i["key"], ""), *extra])
     specs = []
     for tab, rows in tabs.items():
         ws = write_tab(book, tab, rows, dropdowns={"Resolved": RESOLVED_CHOICES, "Assignee": TEAM})
@@ -488,6 +528,41 @@ def done_info(issue, done, since):
     return max(moves) if moves else None
 
 
+def adf_text(node):
+    """Plain text of an Atlassian rich-text field."""
+    if not node:
+        return ""
+    if node.get("type") == "text":
+        return node.get("text", "")
+    return "".join(adf_text(c) for c in node.get("content", [])) + ("\n" if node.get("type") == "paragraph" else "")
+
+
+def related_tickets(f):
+    """[(team, ticket, status)] from Jira's Related Tickets Status field."""
+    found = []
+    for part in re.split(r"\||\n", adf_text(f.get(RELATED_FIELD))):
+        m = re.match(r"\s*(.+?)\s*\(([A-Z][A-Z0-9]*-\d+)\):\s*(.+?)\s*$", part)
+        if m:
+            found.append((m.group(1), m.group(2), m.group(3)))
+    return found
+
+
+def with_team(f, own):
+    """Which team has the problem now, and the related tickets Jira lists.
+
+    A related ticket whose status mentions CS (Pending CS, PENDING RESPONSE (CS)) is waiting for us, so the
+    problem is back with `own` (BO, or Customer on the pending tab); otherwise it is with that ticket's team."""
+    related = related_tickets(f)
+    if not related:
+        return own, ""
+    detail = "; ".join(f"{team} {key}: {status}" for team, key, status in related)
+    active = list(dict.fromkeys(team for team, _, status in related if not re.search(r"\bCS\b", status)))
+    if active:
+        return ", ".join(active), detail
+    answered = ", ".join(dict.fromkeys(team for team, _, _ in related))
+    return f"{own} (reply from {answered})", detail
+
+
 def letter(header, name):
     return chr(ord("A") + header.index(name))
 
@@ -497,7 +572,8 @@ def team_rows(jira, items, choices):
 
     Status is a dropdown the team sets (In Progress / Done); picks made earlier are kept."""
     header = ["Key", "Link", "Request Type", "Summary", "Person", "Status", "Jira Status",
-              "In Status Since", "Hours", "Created", "Days Since Arrived", "Days In Progress"]
+              "In Status Since", "Hours", "Created", "Days Since Arrived", "Days In Progress",
+              "With Team", "Related Tickets (Jira)"]
     since_col, created_col = letter(header, "In Status Since"), letter(header, "Created")
     status_col = letter(header, "Status")
     # Live counters in the always-visible header row, beside the filtered ticket columns.
@@ -512,7 +588,7 @@ def team_rows(jira, items, choices):
                      person(f.get("assignee")), choices.get(i["key"], "In Progress"), f["status"]["name"],
                      fmt(since), Formula(f"=ROUND((NOW()-{since_col}{n})*24,1)"), fmt(parse_dt(f["created"])),
                      Formula(f"=ROUND(NOW()-{created_col}{n},1)"),   # keeps counting up
-                     Formula(f"=ROUND(NOW()-{since_col}{n},1)")])
+                     Formula(f"=ROUND(NOW()-{since_col}{n},1)"), *with_team(f, "BO")])
     return rows
 
 
@@ -520,7 +596,8 @@ def pending_rows(jira, items):
     """Tickets sent back to the customer. The overdue flag lives only here (PENDING_SLA_HOURS)."""
     over_label = f"Over {PENDING_SLA_HOURS}h?"
     header = ["Key", "Link", "Request Type", "Summary", "Person", "Status", "Sent To Customer",
-              "Hours", over_label, "Created", "Days Since Arrived", "Days Waiting For Customer"]
+              "Hours", over_label, "Created", "Days Since Arrived", "Days Waiting For Customer",
+              "With Team", "Related Tickets (Jira)"]
     since_col, created_col = letter(header, "Sent To Customer"), letter(header, "Created")
     hours_col, over_col = letter(header, "Hours"), letter(header, over_label)
     rows = [header + ["", Formula('="Total: "&COUNTA(A2:A)'),
@@ -534,7 +611,7 @@ def pending_rows(jira, items):
                      Formula(f'=IF({hours_col}{n}>{PENDING_SLA_HOURS},"OVERDUE","")'),
                      fmt(parse_dt(f["created"])),
                      Formula(f"=ROUND(NOW()-{created_col}{n},1)"),
-                     Formula(f"=ROUND(NOW()-{since_col}{n},1)")])
+                     Formula(f"=ROUND(NOW()-{since_col}{n},1)"), *with_team(f, "Customer")])
     return rows
 
 
@@ -644,11 +721,12 @@ def progress_book(jira, book, ids_by_tab, log):
     for tab in team_tabs:
         rows = team_rows(jira, by_tab[tab], choices)
         ws = write_tab(book, tab, rows, {"Hours": "0.0", "Days Since Arrived": "0.0", "Days In Progress": "0.0"},
-                       dropdowns={"Status": PROGRESS_CHOICES}, filter_cols=12)
+                       dropdowns={"Status": PROGRESS_CHOICES}, filter_cols=rows[0].index(""))
         specs.append((ws, rows[0].index("Status"), STATUS_COLORS))
     rows = pending_rows(jira, customer)
     ws = write_tab(book, "Pending Customer Response", rows,
-                   {"Hours": "0.0", "Days Since Arrived": "0.0", "Days Waiting For Customer": "0.0"}, filter_cols=12)
+                   {"Hours": "0.0", "Days Since Arrived": "0.0", "Days Waiting For Customer": "0.0"},
+                   filter_cols=rows[0].index(""))
     specs += [(ws, rows[0].index("Status"), STATUS_COLORS),
               (ws, rows[0].index(f"Over {PENDING_SLA_HOURS}h?"), {"OVERDUE": "#ea9999"})]
     rows = productivity_rows(counts)
@@ -684,11 +762,14 @@ def main():
         jira.prefetch(*q_reopened(hours))
     jira._pool.submit(done_statuses, jira)
     with ThreadPoolExecutor(len(SOURCES)) as pool:  # each source sheet gets its own Google client
-        futures = {tab: pool.submit(source_ticket_ids, google(), sid, st) for tab, (sid, st) in SOURCES.items()}
-        ids_by_tab = {tab: f.result() for tab, f in futures.items()}
+        futures = {tab: pool.submit(read_source, google(), sid, st, SOURCE_COLUMNS.get(tab, {}))
+                   for tab, (sid, st) in SOURCES.items()}
+        sources = {tab: f.result() for tab, f in futures.items()}
+    ids_by_tab = {tab: ids for tab, (ids, _) in sources.items()}
+    data_by_tab = {tab: data for tab, (_, data) in sources.items()}
 
     print("Sheet 1: BO to-do tickets by team")
-    todo_tabs(jira, book1, ids_by_tab)
+    todo_tabs(jira, book1, ids_by_tab, data_by_tab)
     drop_default_tab(book1)
     print("  ", book1.url)
 
