@@ -54,7 +54,8 @@ EXCLUDED_PEOPLE = {x.strip().lower() for x in os.environ.get(
 INPROGRESS_STATUSES = [x.strip() for x in os.environ.get(
     "INPROGRESS_STATUSES", "In Progress,Open,Reopened,Work in progress").split(",") if x.strip()]
 PRODUCTIVITY_DAYS = int(os.environ.get("PRODUCTIVITY_DAYS", "30"))
-SLA_HOURS = int(os.environ.get("SLA_HOURS", "24"))
+PENDING_SLA_HOURS = int(os.environ.get("PENDING_SLA_HOURS", "48"))  # flag shown on the Pending Customer tab only
+PROGRESS_CHOICES = ["In Progress", "Done"]
 CUSTOMER_STATUS = os.environ.get("CUSTOMER_STATUS", "Pending Customer Response")
 # A ticket whose request type or summary contains one of these words belongs to the queue.
 INSTALLMENT_WORDS = [w.strip().lower() for w in os.environ.get("INSTALLMENT_KEYWORDS", "installment").split(",") if w.strip()]
@@ -170,32 +171,60 @@ def safe(cell):
     return cell
 
 
-def write_tab(spreadsheet, title, rows, number_formats=None, filter_range=True):
-    try:
-        ws = spreadsheet.worksheet(title)
-    except gspread.exceptions.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title, rows=2, cols=len(rows[0]))
+def get_ws(book, title, ncols):
+    """Worksheet by title, created if missing. Titles are read once per spreadsheet and cached."""
+    cache = book.__dict__.setdefault("_ws_cache", {w.title: w for w in book.worksheets()})
+    if title not in cache:
+        cache[title] = book.add_worksheet(title, rows=2, cols=ncols)
+    return cache[title]
+
+
+def delete_tab(book, title):
+    cache = book.__dict__.setdefault("_ws_cache", {w.title: w for w in book.worksheets()})
+    if title in cache and len(cache) > 1:
+        book.del_worksheet(cache.pop(title))
+
+
+def set_order(book, titles):
+    cache = book.__dict__["_ws_cache"]
+    book.batch_update({"requests": [{"updateSheetProperties": {
+        "properties": {"sheetId": cache[t].id, "index": n}, "fields": "index"}} for n, t in enumerate(titles)]})
+
+
+def write_tab(book, title, rows, number_formats=None, dropdowns=None):
+    """Replace a tab's contents. Layout work (size, header, formats, dropdowns, filter) goes in one batch."""
+    ncols, nrows = len(rows[0]), len(rows)
+    ws = get_ws(book, title, ncols)
     ws.clear()
-    ws.resize(rows=max(len(rows), 2), cols=len(rows[0]))
-    # clear() keeps old cell formats; reset them so a changed layout can't show numbers as dates.
-    reqs = [{"repeatCell": {"range": {"sheetId": ws.id}, "cell": {"userEnteredFormat": {}},
-                            "fields": "userEnteredFormat.numberFormat"}}]
+    sheet = {"sheetId": ws.id}
+    cell_range = lambda col: {**sheet, "startRowIndex": 1, "startColumnIndex": col, "endColumnIndex": col + 1}
+    reqs = [
+        {"updateSheetProperties": {"properties": {**sheet, "gridProperties": {
+            "rowCount": max(nrows, 2), "columnCount": ncols, "frozenRowCount": 1}},
+            "fields": "gridProperties(rowCount,columnCount,frozenRowCount)"}},
+        # clear() keeps old cell formats; reset them so a changed layout can't show numbers as dates.
+        {"repeatCell": {"range": sheet, "cell": {"userEnteredFormat": {}},
+                        "fields": "userEnteredFormat.numberFormat"}},
+        {"repeatCell": {"range": {**sheet, "startRowIndex": 0, "endRowIndex": 1},
+                        "cell": {"userEnteredFormat": {"textFormat": {"bold": True},
+                                                       "backgroundColor": rgb("#94c4b5")}},
+                        "fields": "userEnteredFormat(textFormat,backgroundColor)"}},
+        {"setBasicFilter": {"filter": {"range": {**sheet, "startRowIndex": 0, "startColumnIndex": 0,
+                                                 "endColumnIndex": ncols}}}},
+    ]
     for header, pattern in (number_formats or {}).items():
-        col = rows[0].index(header)
-        reqs.append({"repeatCell": {
-            "range": {"sheetId": ws.id, "startRowIndex": 1, "startColumnIndex": col, "endColumnIndex": col + 1},
-            "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": pattern}}},
-            "fields": "userEnteredFormat.numberFormat"}})
-    spreadsheet.batch_update({"requests": reqs})
+        reqs.append({"repeatCell": {"range": cell_range(rows[0].index(header)),
+                                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": pattern}}},
+                                    "fields": "userEnteredFormat.numberFormat"}})
+    for header, choices in (dropdowns or {}).items():
+        reqs.append({"setDataValidation": {"range": cell_range(rows[0].index(header)), "rule": {
+            "condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": c} for c in choices]},
+            "showCustomUi": True, "strict": True}}})
+    book.batch_update({"requests": reqs})
     body = [rows[0]] + [[safe(c) for c in r] for r in rows[1:]]
     for start in range(0, len(body), 5000):
         ws.update(body[start:start + 5000], f"A{start + 1}", value_input_option="USER_ENTERED")
-    ws.format("1:1", {"textFormat": {"bold": True},
-                      "backgroundColor": {"red": 0.58, "green": 0.77, "blue": 0.71}})
-    ws.freeze(rows=1)
-    if filter_range and len(rows) > 1:
-        ws.set_basic_filter()
-    print(f"  '{title}': {len(rows) - 1} rows")
+    print(f"  '{title}': {nrows - 1} rows")
     return ws
 
 
@@ -217,7 +246,7 @@ STATUS_COLORS = {"Done": "#b7e1cd", "To Do": "#e8eaed", "Clients To Do": "#e1d5f
 
 
 def apply_colors(spreadsheet, specs):
-    """Colour cells by value. specs: [(worksheet, column index, {value: hex colour})].
+    """Colour cells by value. specs: [(worksheet, column index, {value: hex colour} or one hex colour for a heat scale)].
 
     Old rules are deleted first so repeated runs don't pile up duplicates."""
     meta = spreadsheet.fetch_sheet_metadata()
@@ -226,6 +255,12 @@ def apply_colors(spreadsheet, specs):
         for n in reversed(range(len(sheet.get("conditionalFormats", [])))):
             requests_.append({"deleteConditionalFormatRule": {"sheetId": sheet["properties"]["sheetId"], "index": n}})
     for ws, col, colors in specs:
+        if isinstance(colors, str):  # one colour -> white-to-colour heat scale, like a backlog table
+            requests_.append({"addConditionalFormatRule": {"index": 0, "rule": {
+                "ranges": [{"sheetId": ws.id, "startRowIndex": 1, "startColumnIndex": col, "endColumnIndex": col + 1}],
+                "gradientRule": {"minpoint": {"type": "MIN", "color": rgb("#ffffff")},
+                                 "maxpoint": {"type": "MAX", "color": rgb(colors)}}}}})
+            continue
         for value, colour in colors.items():
             requests_.append({"addConditionalFormatRule": {"index": 0, "rule": {
                 "ranges": [{"sheetId": ws.id, "startRowIndex": 1, "startColumnIndex": col, "endColumnIndex": col + 1}],
@@ -264,26 +299,23 @@ def source_ticket_ids(gc, sheet_id, tab):
     return found
 
 
-def existing_choices(spreadsheet, title, column="Resolved"):
-    """Dropdown picks already made in a tab, so a refresh doesn't wipe them."""
-    try:
-        values = spreadsheet.worksheet(title).get_all_values()
-    except gspread.exceptions.WorksheetNotFound:
-        return {}
-    if not values or column not in values[0]:
-        return {}
-    col = values[0].index(column)
-    return {r[0]: r[col] for r in values[1:] if len(r) > col and r[col]}
-
-
-def add_dropdown(spreadsheet, ws, header, choices, rows):
-    col = ws.row_values(1).index(header)
-    spreadsheet.batch_update({"requests": [{"setDataValidation": {
-        "range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": max(rows, 1) + 1,
-                  "startColumnIndex": col, "endColumnIndex": col + 1},
-        "rule": {"condition": {"type": "ONE_OF_LIST",
-                               "values": [{"userEnteredValue": c} for c in choices]},
-                 "showCustomUi": True, "strict": True}}}]})
+def read_picks(book, titles, columns):
+    """Dropdown picks already made in the sheet, {column: {ticket key: pick}}, so a refresh doesn't wipe them."""
+    cache = book.__dict__.setdefault("_ws_cache", {w.title: w for w in book.worksheets()})
+    found = [t for t in titles if t in cache]
+    picks = {c: {} for c in columns}
+    if not found:
+        return picks
+    ranges = book.values_batch_get([f"'{t}'" for t in found]).get("valueRanges", [])
+    for vr in ranges:
+        values = vr.get("values", [])
+        if not values:
+            continue
+        for c in columns:
+            if c in values[0]:
+                idx = values[0].index(c)
+                picks[c].update({r[0]: r[idx] for r in values[1:] if len(r) > idx and r[idx]})
+    return picks
 
 
 def route(issue, ids_by_tab):
@@ -300,22 +332,36 @@ def route(issue, ids_by_tab):
     return "Others"
 
 
-def todo_tabs(jira, gc, book):
+def backlog_tab(jira, book):
+    """Contact-type table (Closed / Pending / Untouched) over everything that arrived since BO_FROM."""
+    done = done_statuses(jira)
+    issues = jira.search(f'project = {PROJECT} AND created >= "{BO_FROM}"', ["status", REQUEST_TYPE_FIELD, "summary"])
+    per = defaultdict(lambda: {"Closed": 0, "Pending": 0, "Untouched": 0})
+    for i in issues:
+        f = i["fields"]
+        name = f["status"]["name"]
+        group = "Untouched" if name in BO_TODO_STATUSES else "Closed" if name in done else "Pending"
+        per[request_type(f) or f["summary"]][group] += 1
+    header = ["Contact Type", "Closed", "Pending", "Untouched", "Total"]
+    rows = [header] + [[k, v["Closed"], v["Pending"], v["Untouched"], sum(v.values())]
+                       for k, v in sorted(per.items(), key=lambda kv: (-kv[1]["Closed"], kv[0]))]
+    ws = write_tab(book, "Backlog", rows)
+    return [(ws, 1, "#57bb8a"), (ws, 2, "#f6b26b"), (ws, 3, "#e06666")]
+
+
+def todo_tabs(jira, book, ids_by_tab):
     """Build the MDB / Installment / Product / Others tabs from the L1 board's to-do tickets."""
     statuses = ", ".join(f'"{x}"' for x in BO_TODO_STATUSES)
     issues = jira.search(
         f'project = {PROJECT} AND status in ({statuses}) AND created >= "{BO_FROM}" ORDER BY created DESC',
         FIELDS)
     print(f"  {len(issues)} to-do tickets since {BO_FROM}")
-    ids_by_tab = {tab: source_ticket_ids(gc, sid, source_tab) for tab, (sid, source_tab) in SOURCES.items()}
     header = ["Key", "Link", "Request Type", "Customer Ticket", "Status",
               "Assignee", "Created", "Updated", "Resolved"]
     tabs = {name: [header] for name in [*SOURCES, "Others"]}
-    choices = {}  # Resolved picks made earlier, kept even if a ticket moves to another tab
-    assignees = {}
-    for name in tabs:
-        choices.update(existing_choices(book, name))
-        assignees.update({k: v for k, v in existing_choices(book, name, "Assignee").items() if v in TEAM})
+    picks = read_picks(book, list(tabs), ["Resolved", "Assignee"])  # kept even if a ticket moves tab
+    choices = picks["Resolved"]
+    assignees = {k: v for k, v in picks["Assignee"].items() if v in TEAM}
     conflicts = 0
     for i in issues:
         f = i["fields"]
@@ -330,20 +376,16 @@ def todo_tabs(jira, gc, book):
                           choices.get(i["key"], "")])
     specs = []
     for tab, rows in tabs.items():
-        ws = write_tab(book, tab, rows)
-        add_dropdown(book, ws, "Resolved", RESOLVED_CHOICES, len(rows) - 1)
-        add_dropdown(book, ws, "Assignee", TEAM, len(rows) - 1)
+        ws = write_tab(book, tab, rows, dropdowns={"Resolved": RESOLVED_CHOICES, "Assignee": TEAM})
         specs += [(ws, header.index("Resolved"), RESOLVED_COLORS),
                   (ws, header.index("Assignee"), TEAM_COLORS),
                   (ws, header.index("Status"), STATUS_COLORS)]
+    specs += backlog_tab(jira, book)
     apply_colors(book, specs)
     if conflicts:
         print(f"  {conflicts} ticket(s) were routed by keyword to a different tab than a source sheet lists")
-    for old in ("BO Tickets",):
-        try:
-            book.del_worksheet(book.worksheet(old))
-        except gspread.exceptions.WorksheetNotFound:
-            pass
+    delete_tab(book, "BO Tickets")
+    set_order(book, ["Backlog", *tabs])
 
 
 def done_statuses(jira):
@@ -366,67 +408,61 @@ def done_info(issue, done, since):
     return max(moves) if moves else None
 
 
-STATE_ORDER = {"In Progress": 0, "Pending Customer Response": 0, "Done": 1}
-TICKET_HEADER = ["Key", "Link", "Queue", "Request Type", "Summary", "Person", "Status", "Jira Status",
-                 "Since", "Hours", f"Over {SLA_HOURS}h?", "Created", "Days Since Arrived", "Days In Progress"]
+def letter(header, name):
+    return chr(ord("A") + header.index(name))
 
 
-def progress_start(issue, before):
-    """When the ticket last moved into an In Progress status before `before` (else when it was created)."""
-    starts = [parse_dt(h["created"])
-              for h in (issue.get("changelog") or {}).get("histories", [])
-              for it in h.get("items", [])
-              if it.get("field") == "status" and it.get("toString") in INPROGRESS_STATUSES
-              and parse_dt(h["created"]) <= before]
-    return max(starts) if starts else parse_dt(issue["fields"]["created"])
+def team_rows(jira, items, choices):
+    """In-progress tickets for one team tab. items: [(issue, in-status-since)].
 
-
-def ticket_rows(jira, items, since_label, progress_label="Days In Progress"):
-    """items: [(issue, state, since datetime, done datetime or None)].
-
-    Hours is live (counts up) for open tickets and fixed (created -> done) for done ones."""
-    rows = [[*TICKET_HEADER[:8], since_label, *TICKET_HEADER[9:13], progress_label]]
-    items = sorted(items, key=lambda x: (person(x[0]["fields"].get("assignee")),
-                                         STATE_ORDER[x[1]], x[2]))
-    for n, (i, state, since, done_at) in enumerate(items, start=2):
+    Status is a dropdown the team sets (In Progress / Done); picks made earlier are kept."""
+    header = ["Key", "Link", "Request Type", "Summary", "Person", "Status", "Jira Status",
+              "In Status Since", "Hours", "Created", "Days Since Arrived", "Days In Progress"]
+    since_col, created_col = letter(header, "In Status Since"), letter(header, "Created")
+    rows = [header]
+    items = sorted(items, key=lambda x: (person(x[0]["fields"].get("assignee")), x[1]))
+    for n, (i, since) in enumerate(items, start=2):
         f = i["fields"]
-        created = parse_dt(f["created"])
-        if done_at:
-            # Finished: the counters stop at the moment it was done.
-            hours, over = round((done_at - created).total_seconds() / 3600, 1), ""
-            arrived = round((done_at - created).total_seconds() / 86400, 1)
-            in_progress = round((done_at - progress_start(i, done_at)).total_seconds() / 86400, 1)
-        else:
-            hours = Formula(f"=ROUND((NOW()-I{n})*24,1)")
-            over = Formula(f'=IF(J{n}>{SLA_HOURS},"OVERDUE","")')
-            arrived = Formula(f"=ROUND(NOW()-L{n},1)")      # keeps counting up
-            in_progress = Formula(f"=ROUND(NOW()-I{n},1)")
-        rows.append([i["key"], f"{jira.base}/browse/{i['key']}", queue_of(i), request_type(f),
-                     f["summary"], person(f.get("assignee")), state, f["status"]["name"],
-                     fmt(since), hours, over, fmt(created), arrived, in_progress])
+        rows.append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f), f["summary"],
+                     person(f.get("assignee")), choices.get(i["key"], "In Progress"), f["status"]["name"],
+                     fmt(since), Formula(f"=ROUND((NOW()-{since_col}{n})*24,1)"), fmt(parse_dt(f["created"])),
+                     Formula(f"=ROUND(NOW()-{created_col}{n},1)"),   # keeps counting up
+                     Formula(f"=ROUND(NOW()-{since_col}{n},1)")])
     return rows
 
 
-def productivity_rows(done_issues, done, since):
-    """Tickets moved into a Done-type status, credited to whoever moved them."""
-    per = defaultdict(lambda: {"n": 0, "hours": 0.0, "inst": 0})
-    for i in done_issues:
-        info = done_info(i, done, since)
-        if not info or excluded(info[1]):
-            continue
-        when, who = info
-        key = (when.strftime("%Y-%m-%d"), who)
-        per[key]["n"] += 1
-        per[key]["hours"] += (when - parse_dt(i["fields"]["created"])).total_seconds() / 3600
-        per[key]["inst"] += queue_of(i) == "Installment"
-    rows = [["Date", "Person", "Tickets Resolved", "Of Which Installment", "Avg Hours To Resolve"]]
-    for (day, who), v in sorted(per.items(), reverse=True):
-        rows.append([day, who, v["n"], v["inst"], round(v["hours"] / v["n"], 1)])
+def pending_rows(jira, items):
+    """Tickets sent back to the customer. The overdue flag lives only here (PENDING_SLA_HOURS)."""
+    over_label = f"Over {PENDING_SLA_HOURS}h?"
+    header = ["Key", "Link", "Request Type", "Summary", "Person", "Status", "Sent To Customer",
+              "Hours", over_label, "Created", "Days Since Arrived", "Days Waiting For Customer"]
+    since_col, created_col = letter(header, "Sent To Customer"), letter(header, "Created")
+    hours_col = letter(header, "Hours")
+    rows = [header]
+    items = sorted(items, key=lambda x: (person(x[0]["fields"].get("assignee")), x[1]))
+    for n, (i, since) in enumerate(items, start=2):
+        f = i["fields"]
+        rows.append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f), f["summary"],
+                     person(f.get("assignee")), f["status"]["name"], fmt(since),
+                     Formula(f"=ROUND((NOW()-{since_col}{n})*24,1)"),
+                     Formula(f'=IF({hours_col}{n}>{PENDING_SLA_HOURS},"OVERDUE","")'),
+                     fmt(parse_dt(f["created"])),
+                     Formula(f"=ROUND(NOW()-{created_col}{n},1)"),
+                     Formula(f"=ROUND(NOW()-{since_col}{n},1)")])
     return rows
 
 
-def progress_book(jira, book):
-    """Sheet 2: In Progress (with Done), Pending Customer Response, Productivity."""
+def productivity_rows(counts):
+    """One row per person: total cases and how many are in progress / done / waiting on the customer."""
+    header = ["Person", "Total Cases", "In Progress", f"Done (last {PRODUCTIVITY_DAYS} days)", "Pending Customer"]
+    rows = [header]
+    for who, c in sorted(counts.items(), key=lambda kv: (-sum(kv[1].values()), kv[0])):
+        rows.append([who, sum(c.values()), c["progress"], c["done"], c["customer"]])
+    return rows
+
+
+def progress_book(jira, book, ids_by_tab):
+    """Sheet 2: MDB / Installment / Product / Others (in-progress tickets), Pending Customer Response, Productivity."""
     done = done_statuses(jira)
     window = datetime.now(TZ) - timedelta(days=PRODUCTIVITY_DAYS)
     quoted = ", ".join(f'"{x}"' for x in INPROGRESS_STATUSES + [CUSTOMER_STATUS])
@@ -435,36 +471,48 @@ def progress_book(jira, book):
         f"project = {PROJECT} AND status changed DURING (-{PRODUCTIVITY_DAYS}d, now()) AND statusCategory = Done",
         FIELDS, expand="changelog")
 
-    first = datetime.fromisoformat(BO_FROM).replace(tzinfo=TZ)
-    mine, customer = [], []
+    team_tabs = [*SOURCES, "Others"]
+    # In Progress / Done picks made in the sheet earlier
+    choices = {k: v for k, v in read_picks(book, team_tabs, ["Status"])["Status"].items() if v in PROGRESS_CHOICES}
+
+    by_tab = {name: [] for name in team_tabs}
+    customer = []
+    counts = defaultdict(lambda: {"progress": 0, "done": 0, "customer": 0})
     for i in open_issues:
-        if excluded(person(i["fields"].get("assignee"))):
+        who = person(i["fields"].get("assignee"))
+        if excluded(who):
             continue
         name = i["fields"]["status"]["name"]
         if name == CUSTOMER_STATUS:
-            customer.append((i, CUSTOMER_STATUS, status_since(i), None))
+            customer.append((i, status_since(i)))
+            counts[who]["customer"] += 1
         elif name in INPROGRESS_STATUSES:
-            mine.append((i, "In Progress", status_since(i), None))
-    for i in done_issues:
-        info = done_info(i, done, first)
-        if info and not excluded(person(i["fields"].get("assignee"))):
-            mine.append((i, "Done", info[0], info[0]))
+            by_tab[route(i, ids_by_tab)].append((i, status_since(i)))
+            counts[who]["done" if choices.get(i["key"]) == "Done" else "progress"] += 1
+    for i in done_issues:  # closed in Jira: credited to whoever moved the ticket
+        info = done_info(i, done, window)
+        if info and not excluded(info[1]):
+            counts[info[1]]["done"] += 1
+    counts.pop("Unassigned", None)
 
     specs = []
-    for title, items, label, days_label in [
-            ("In Progress", mine, "In Status / Done Since", "Days In Progress"),
-            ("Pending Customer Response", customer, "Sent To Customer", "Days Waiting For Customer")]:
-        rows = ticket_rows(jira, items, label, days_label)
-        ws = write_tab(book, title, rows, {"Hours": "0.0", "Days Since Arrived": "0.0", days_label: "0.0"})
-        specs += [(ws, rows[0].index("Status"), STATUS_COLORS),
-                  (ws, rows[0].index(f"Over {SLA_HOURS}h?"), {"OVERDUE": "#ea9999"})]
-    write_tab(book, "Productivity", productivity_rows(done_issues, done, window))
+    for tab in team_tabs:
+        rows = team_rows(jira, by_tab[tab], choices)
+        ws = write_tab(book, tab, rows, {"Hours": "0.0", "Days Since Arrived": "0.0", "Days In Progress": "0.0"},
+                       dropdowns={"Status": PROGRESS_CHOICES})
+        specs.append((ws, rows[0].index("Status"), STATUS_COLORS))
+    rows = pending_rows(jira, customer)
+    ws = write_tab(book, "Pending Customer Response", rows,
+                   {"Hours": "0.0", "Days Since Arrived": "0.0", "Days Waiting For Customer": "0.0"})
+    specs += [(ws, rows[0].index("Status"), STATUS_COLORS),
+              (ws, rows[0].index(f"Over {PENDING_SLA_HOURS}h?"), {"OVERDUE": "#ea9999"})]
+    rows = productivity_rows(counts)
+    ws = write_tab(book, "Productivity", rows)
+    specs += [(ws, 2, "#f6b26b"), (ws, 3, "#57bb8a"), (ws, 4, "#ffd966")]
     apply_colors(book, specs)
-    for old in ("Pending Other Teams",):
-        try:
-            book.del_worksheet(book.worksheet(old))
-        except gspread.exceptions.WorksheetNotFound:
-            pass
+    for old in ("In Progress", "Pending Other Teams"):
+        delete_tab(book, old)
+    set_order(book, [*team_tabs, "Pending Customer Response", "Productivity"])
 
 
 # ----------------------------------------------------------------- main
@@ -476,14 +524,15 @@ def main():
     print("Sheet 1: BO to-do tickets by team")
     book1 = gc.open_by_key(env("BO_SHEET_ID"))
     set_timezone(book1)
-    todo_tabs(jira, gc, book1)
+    ids_by_tab = {tab: source_ticket_ids(gc, sid, source_tab) for tab, (sid, source_tab) in SOURCES.items()}
+    todo_tabs(jira, book1, ids_by_tab)
     drop_default_tab(book1)
     print("  ", book1.url)
 
-    print("Sheet 2: In Progress / Pending Customer / Productivity")
+    print("Sheet 2: team tabs / Pending Customer / Productivity")
     book2 = gc.open_by_key(env("INPROGRESS_SHEET_ID"))
     set_timezone(book2)
-    progress_book(jira, book2)
+    progress_book(jira, book2, ids_by_tab)
     drop_default_tab(book2)
     print("  ", book2.url)
     print("Done at", datetime.now(TZ).strftime("%Y-%m-%d %H:%M %Z"))
