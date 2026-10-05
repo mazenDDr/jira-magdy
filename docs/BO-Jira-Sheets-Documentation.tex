@@ -103,7 +103,7 @@
     \textbf{Created by} & Mohamed Magdy \\
     \textbf{Company}    & Connect Money \\
     \textbf{Team}       & Back Office (BO), Jira project \code{L1} \\
-    \textbf{Version}    & 1.0 \\
+    \textbf{Version}    & 1.1 \\
     \textbf{Date}       & 5 October 2026 \\
   \end{tabular}
 \end{center}
@@ -234,6 +234,7 @@ Created & Start of the ``days since arrived'' counter. \\
 Request Type (L1) & The ``contact type''. Used for routing and for the Backlog table. \\
 Summary & Contains the customer ticket reference at the end, for example \code{| CCS-15449}. \\
 Status history (changelog) & Tells when a ticket entered its current status, and who closed it. \\
+Related Tickets Status & Lists the linked tickets in other teams' projects and their status (used for \emph{With Team}). \\
 \bottomrule
 \end{tabularx}
 
@@ -321,6 +322,32 @@ Resolved & \textbf{Dropdown}: \emph{Solved}, \emph{Pending for customer response
 \end{tabularx}
 
 The Summary column is deliberately not shown on this sheet.
+
+\subsection{Extra columns copied from the source sheets}
+\label{sec:extra}
+To the right of \emph{Resolved}, each tab gets columns that the program copies from the team's source sheet. The row
+is found by the ticket number, as in Section~\ref{sec:routing}.
+
+\begin{tabularx}{\linewidth}{@{}l L@{}}
+\toprule
+\textbf{Tab} & \textbf{Columns added (and where they come from)} \\
+\midrule
+\tab{MDB} & \emph{Card \#}, \emph{Acc No}, \emph{Description}, \emph{Amount}, \emph{Disputed Amount If Partial},
+\emph{Project}, \emph{BO Owner}, \emph{Validation}: the same-named columns of the MDP sheet. \\
+\tab{Installment} & \emph{Comment}: the \emph{First Comment} column of the Credit Sheet. \\
+\tab{Product} & \emph{Comment}: the \emph{Comment} column of the FO/BO sheet (often an escalation ticket such as
+\code{TEC-14867}). \\
+\tab{Others} & \emph{Comment}: no source sheet, so it starts empty and can be typed by hand. \\
+\bottomrule
+\end{tabularx}
+
+\begin{itemize}
+  \item A new ticket usually is not in the source sheet yet, because people fill those sheets by hand. Its cells stay
+    empty and fill in automatically at the first refresh after the row appears.
+  \item A \emph{Comment} typed by hand in this sheet is kept as long as the source sheet has no comment for that ticket.
+    When the source sheet does have one, the source wins and replaces what was typed.
+  \item \emph{Card \#} and \emph{Acc No} are stored as text, so numbers such as \code{0538} keep their leading zero.
+\end{itemize}
 
 \subsection{The dropdowns}
 \begin{description}[leftmargin=!,labelwidth=3.4cm]
@@ -441,6 +468,8 @@ Hours & Live counter: hours since ``In Status Since''. \\
 Created & When the ticket was created. \\
 Days Since Arrived & Live counter: days since ``Created''. \\
 Days In Progress & Live counter: days since ``In Status Since''. \\
+With Team & Which team has the problem now (Section~\ref{sec:withteam}). \\
+Related Tickets (Jira) & The linked tickets in other teams' Jira projects and their status, as Jira lists them. \\
 \bottomrule
 \end{tabularx}
 
@@ -449,6 +478,36 @@ Days In Progress & Live counter: days since ``In Status Since''. \\
 time. They keep increasing between refreshes without any help from the program. A ticket created at 09:00 shows
 ``0.5'' days at 21:00.
 \end{note}
+
+\subsection{Which team has the problem}
+\label{sec:withteam}
+Jira keeps a field called \emph{Related Tickets Status}. When a BO ticket is escalated, the field lists the linked ticket
+in the other team's project and that ticket's status, for example
+\code{Operations (OPS-1934): Pending CS}. The program reads this field and fills two columns on every ticket tab of the
+In Progress sheet:
+\begin{itemize}
+  \item \textbf{Related Tickets (Jira)}: exactly what Jira lists, shortened to \emph{team, ticket, status}.
+  \item \textbf{With Team}: who has the problem now, worked out with this rule:
+\end{itemize}
+\begin{tabularx}{\linewidth}{@{}L L@{}}
+\toprule
+\textbf{What Jira shows} & \textbf{With Team} \\
+\midrule
+No related ticket & \emph{BO} (or \emph{Customer} on the Pending Customer Response tab) \\
+A related ticket whose status does \emph{not} mention CS, for example \emph{In Progress (OPS)} & the name of that
+team, for example \emph{Operations} \\
+Every related ticket has a CS status, for example \emph{Pending CS} or \emph{PENDING RESPONSE (CS)} &
+\emph{BO (reply from Operations)}: the other team has answered and is waiting for us \\
+\bottomrule
+\end{tabularx}
+
+\begin{warning}[This rule is an interpretation]
+\emph{With Team} is based on the status wording ``CS'' meaning that the other team is waiting for Customer Support. If
+the other teams use their statuses differently, the rule can be changed in one place in the program. The column
+\emph{Related Tickets (Jira)} always shows the raw facts so the result can be checked.
+\end{warning}
+Tickets that sit in an escalation status of their own (for example \emph{Pending Tech (Lucky)} or \emph{Pending
+Collection}) are not shown on this sheet; those statuses already name the team.
 
 \subsection{The Status dropdown and what ``Done'' means}
 \begin{itemize}
@@ -818,6 +877,8 @@ productivity; Backlog table. \\
 9 & Reliability fix: GitHub's scheduler skipped runs, so the Google timer now starts every run. \\
 10 & Speed-up: Done Log, parallel reads, batched writes (run time from about 80 seconds to about 30 seconds). \\
 11 & BO Productivity tab; live totals in the In Progress tabs; this document. \\
+12 & MDP case columns on the BO MDB tab; Comment column on the other BO tabs; \emph{With Team} and \emph{Related Tickets}
+on the In Progress sheet. \\
 \bottomrule
 \end{tabularx}
 
