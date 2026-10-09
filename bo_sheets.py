@@ -65,10 +65,10 @@ STATUS_TEAM = {"Escalated to MDP": "MDP", "Pending BM": "BM", "Pending Customer 
                "Pending Fraud": "Fraud", "Pending Collection": "Collection"}
 TAB_INPROGRESS, TAB_UNASSIGNED = "In-progress", "in-progress unassigned"  # as named in the sheet
 TAB_OTHER, TAB_PENDING = "other teams", "pending"
+TAB_DONE = "done"
 LEGACY_TABS = ["MDB", "Installment", "Product", "Others", "Pending Customer Response", "In Progress", "Pending Other Teams"]
 PRODUCTIVITY_DAYS = int(os.environ.get("PRODUCTIVITY_DAYS", "30"))
 PENDING_SLA_HOURS = int(os.environ.get("PENDING_SLA_HOURS", "48"))  # flag shown on the Pending Customer tab only
-PROGRESS_CHOICES = ["In Progress", "Done"]
 CUSTOMER_STATUS = os.environ.get("CUSTOMER_STATUS", "Pending Customer Response")
 # A ticket whose request type or summary contains one of these words belongs to the queue.
 INSTALLMENT_WORDS = [w.strip().lower() for w in os.environ.get("INSTALLMENT_KEYWORDS", "installment").split(",") if w.strip()]
@@ -615,36 +615,35 @@ def letter(header, name):
     return chr(ord("A") + header.index(name))
 
 
-def team_rows(jira, items, choices, ids_by_tab):
-    """In-progress tickets for one team tab. items: [(issue, in-status-since)].
-
-    Status is a dropdown the team sets (In Progress / Done); picks made earlier are kept."""
-    header = ["Key", "Link", "Queue", "Request Type", "Person", "Status", "Jira Status",
+def team_rows(jira, items, ids_by_tab):
+    """In-progress tickets for one team tab. items: [(issue, in-status-since)]."""
+    header = ["Key", "Link", "Queue", "Request Type", "Person", "Jira Status",
               "In Status Since", "Created", "Days Since Arrived", "Days In Progress", "Comment"]
     since_col, created_col = letter(header, "In Status Since"), letter(header, "Created")
-    status_col = letter(header, "Status")
-    # Live counters in the always-visible header row, beside the filtered ticket columns.
-    counters = ["", Formula('="Total: "&COUNTA(A2:A)'),
-                Formula(f'="In Progress: "&COUNTIF({status_col}2:{status_col},"In Progress")'),
-                Formula(f'="Done: "&COUNTIF({status_col}2:{status_col},"Done")')]
-    rows = [header + counters]
+    rows = [header + ["", Formula('="Total: "&COUNTA(A2:A)')]]
     oldest = datetime.min.replace(tzinfo=TZ)
-    items = sorted(items, key=lambda x: (person(x[0]["fields"].get("assignee")), len(x) > 2, x[1] or oldest))
-    for n, item in enumerate(items, start=2):
-        i, since = item[0], item[1]
+    items = sorted(items, key=lambda x: (person(x[0]["fields"].get("assignee")), x[1] or oldest))
+    for n, (i, since) in enumerate(items, start=2):
         f = i["fields"]
-        if len(item) > 2:  # closed in Jira after the team marked it Done: kept, with the counters stopped
-            created = parse_dt(f["created"])
-            span = (lambda days: round((since - created).total_seconds() / days) if since else "")
-            rows.append([i["key"], f"{jira.base}/browse/{i['key']}", route(i, ids_by_tab), request_type(f),
-                         person(f.get("assignee")), "Done", f["status"]["name"], fmt(since),
-                         fmt(created), span(86400), "", comment(f)])
-            continue
         rows.append([i["key"], f"{jira.base}/browse/{i['key']}", route(i, ids_by_tab), request_type(f),
-                     person(f.get("assignee")), choices.get(i["key"], "In Progress"), f["status"]["name"],
-                     fmt(since), fmt(parse_dt(f["created"])),
+                     person(f.get("assignee")), f["status"]["name"], fmt(since), fmt(parse_dt(f["created"])),
                      Formula(f"=ROUND(NOW()-{created_col}{n},0)"),   # keeps counting up
                      Formula(f"=ROUND(NOW()-{since_col}{n},0)"), comment(f)])
+    return rows
+
+
+def done_tab_rows(jira, items, ids_by_tab):
+    """Finished tickets. items: [(issue, closed-at or None, closed-by or "")]; days to close stop counting."""
+    header = ["Key", "Link", "Queue", "Request Type", "Person", "Jira Status", "Closed At", "Closed By",
+              "Created", "Days To Close", "Comment"]
+    rows = [header + ["", Formula('="Total: "&COUNTA(A2:A)')]]
+    epoch = datetime.min.replace(tzinfo=TZ)
+    for i, closed, by in sorted(items, key=lambda x: x[1] or epoch, reverse=True):
+        f = i["fields"]
+        created = parse_dt(f["created"])
+        rows.append([i["key"], f"{jira.base}/browse/{i['key']}", route(i, ids_by_tab), request_type(f),
+                     person(f.get("assignee")), f["status"]["name"], fmt(closed), by, fmt(created),
+                     round((closed - created).total_seconds() / 86400) if closed else "", comment(f)])
     return rows
 
 
@@ -766,9 +765,9 @@ def progress_book(jira, book, ids_by_tab, log):
     open_issues = jira.search(*q_open())
     entries = refresh_done_log(jira, *log, window)
 
-    # In Progress / Done picks made in the sheet earlier (also from the tabs of the old layout)
-    choices = {k: v for k, v in read_picks(book, [TAB_INPROGRESS, TAB_UNASSIGNED, *LEGACY_TABS],
-                                           ["Status"])["Status"].items() if v in PROGRESS_CHOICES}
+    # Tickets already marked Done in the old Status dropdown, or already listed on the done tab, stay on the done tab.
+    marked = read_picks(book, [TAB_INPROGRESS, TAB_UNASSIGNED, *LEGACY_TABS], ["Status"])["Status"]
+    finished = {k for k, v in marked.items() if v == "Done"} | set(read_picks(book, [TAB_DONE], ["Key"])["Key"])
 
     assigned, unassigned, other, customer = [], [], [], []
     counts = defaultdict(lambda: {"progress": 0, "done": 0, "customer": 0})
@@ -779,22 +778,20 @@ def progress_book(jira, book, ids_by_tab, log):
         name, since = i["fields"]["status"]["name"], status_since(i)
         if name == IN_PROGRESS_STATUS:
             (assigned if i["fields"].get("assignee") else unassigned).append((i, since))
-            counts[who]["done" if choices.get(i["key"]) == "Done" else "progress"] += 1
+            counts[who]["progress"] += 1
         if name == CUSTOMER_STATUS:
             customer.append((i, since))
             counts[who]["customer"] += 1
         if name in OTHER_TEAM_STATUSES and name not in (IN_PROGRESS_STATUS, CUSTOMER_STATUS):
             other.append((i, since))
-    # Tickets the team marked Done stay on the sheet after Jira closes them. They are already counted as Done
-    # through the Done Log below, so they are not counted again here.
-    open_keys = {i["key"] for i in open_issues}
-    kept = sorted(k for k, v in choices.items() if v == "Done" and k not in open_keys)
-    for start in range(0, len(kept), 100):
-        for i in jira.search(f"key in ({', '.join(kept[start:start + 100])})", FIELDS + [VALIDATION_FIELD]):
+    # Finished tickets stay on the done tab after they are closed in Jira. Counted through the Done Log below.
+    wanted = sorted(finished | {k for k, (when, who) in entries.items() if not excluded(who)})
+    done_items = []
+    for start in range(0, len(wanted), 100):
+        for i in jira.search(f"key in ({', '.join(wanted[start:start + 100])})", FIELDS + [VALIDATION_FIELD]):
             if not excluded(person(i["fields"].get("assignee"))):
                 closed = entries.get(i["key"])
-                (assigned if i["fields"].get("assignee") else unassigned).append(
-                    (i, closed[0] if closed else None, True))
+                done_items.append((i, closed[0] if closed else None, closed[1] if closed else ""))
     for when, who in entries.values():  # closed in Jira: credited to whoever moved the ticket
         if not excluded(who):
             counts[who]["done"] += 1
@@ -803,10 +800,9 @@ def progress_book(jira, book, ids_by_tab, log):
     specs = []
     hours = {"Days Since Arrived": "0"}
     for title, items in ((TAB_INPROGRESS, assigned), (TAB_UNASSIGNED, unassigned)):
-        rows = team_rows(jira, items, choices, ids_by_tab)
-        ws = write_tab(book, title, rows, {**hours, "Days In Progress": "0"},
-                       dropdowns={"Status": PROGRESS_CHOICES}, filter_cols=rows[0].index(""))
-        specs.append((ws, rows[0].index("Status"), STATUS_COLORS))
+        rows = team_rows(jira, items, ids_by_tab)
+        ws = write_tab(book, title, rows, {**hours, "Days In Progress": "0"}, filter_cols=rows[0].index(""))
+        specs.append((ws, rows[0].index("Jira Status"), STATUS_COLORS))
     rows = other_rows(jira, other, ids_by_tab)
     ws = write_tab(book, TAB_OTHER, rows, {**hours, "Days In Status": "0"}, filter_cols=rows[0].index(""))
     specs.append((ws, rows[0].index("Jira Status"), STATUS_COLORS))
@@ -815,17 +811,20 @@ def progress_book(jira, book, ids_by_tab, log):
                    filter_cols=rows[0].index(""))
     specs += [(ws, rows[0].index("Status"), STATUS_COLORS),
               (ws, rows[0].index(f"Over {PENDING_SLA_HOURS}h?"), {"OVERDUE": "#ea9999"})]
+    rows = done_tab_rows(jira, done_items, ids_by_tab)
+    ws = write_tab(book, TAB_DONE, rows, filter_cols=rows[0].index(""))
+    specs.append((ws, rows[0].index("Jira Status"), STATUS_COLORS))
     rows = productivity_rows(counts)
     ws = write_tab(book, "Productivity", rows, filter_cols=5)
     specs += [(ws, 2, "#f6b26b"), (ws, 3, "#57bb8a"), (ws, 4, "#ffd966")]
     write_tab(book, DONE_LOG_TAB, done_log_rows(entries), hidden=True)  # kept for the next run, hidden from view
     flush(book)
     apply_colors(book, specs)
-    current = {t.lower() for t in (TAB_INPROGRESS, TAB_UNASSIGNED, TAB_OTHER, TAB_PENDING)}
+    current = {t.lower() for t in (TAB_INPROGRESS, TAB_UNASSIGNED, TAB_OTHER, TAB_PENDING, TAB_DONE)}
     for old in LEGACY_TABS:  # the tabs of the earlier layout
         if old.lower() not in current:
             delete_tab(book, old)
-    set_order(book, [TAB_INPROGRESS, TAB_UNASSIGNED, TAB_OTHER, TAB_PENDING, "Productivity", DONE_LOG_TAB])
+    set_order(book, [TAB_INPROGRESS, TAB_UNASSIGNED, TAB_OTHER, TAB_PENDING, TAB_DONE, "Productivity", DONE_LOG_TAB])
 
 
 # ----------------------------------------------------------------- main
