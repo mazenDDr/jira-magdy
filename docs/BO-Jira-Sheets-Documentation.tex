@@ -329,9 +329,11 @@ The Summary column is deliberately not shown on this sheet.
 \subsection{The Comment column and free space}
 \label{sec:extra}
 \begin{itemize}
-  \item The \tab{MDB} tab has only the columns listed above. (An earlier version copied case columns such as Card \#, Acc
-    No and Validation from the MDP sheet; they were removed on request.)
-  \item Every other tab (\tab{Installment}, \tab{Product}, \tab{Others}, \tab{Client To Do}) has one more column at the
+  \item The \tab{MDB} tab has one more column at the end, \emph{Resolved}: a dropdown with \swatch{sheetgreen}~Solved,
+    \swatch{sheetyellow}~Pending for customer response and \swatch{sheetred}~On hold, chosen by hand. It exists only on
+    this tab, and the choice is remembered by ticket key. It does not change Jira. (An earlier version also copied case
+    columns such as Card \#, Acc No and Validation from the MDP sheet; they were removed on request.)
+  \item Every other tab (\tab{Installment}, \tab{Product}, \tab{Others}, \tab{Client To Do}) has, instead, a column at the
     end, \emph{Comment}.
   \item \emph{Comment} shows what the team wrote in the Jira field \emph{L1 Validation Description} on the ticket, on one
     line. It is not the \emph{Reply to Customer (Public)} field. A \emph{Comment} typed by hand in this sheet is kept as
@@ -344,6 +346,7 @@ The Summary column is deliberately not shown on this sheet.
 \begin{description}[leftmargin=!,labelwidth=3.4cm]
   \item[Assignee] Mego, Helana, Abdallah, Heba, Reem, Samy, Bassem, Mayar. The names are used exactly as written; the
     system never tries to match them to Jira users. The column starts empty.
+  \item[Resolved] (MDB tab only) Solved, Pending for customer response, On hold.
 \end{description}
 Each name has its own colour so the sheet can be scanned quickly. A choice is remembered by ticket key: when the sheet
 refreshes, it stays with its ticket even if the ticket moves to a different tab.
@@ -421,31 +424,45 @@ have no Assignee choice.
 \toprule
 \textbf{Tab} & \textbf{Content} \\
 \midrule
-\tab{MDB}, \tab{Installment}, \tab{Product}, \tab{Others} & Tickets currently in progress with the BO team, routed by the
-same rules as the BO sheet (Section~\ref{sec:routing}). \\
-\tab{Pending Customer Response} & Tickets sent back to the customer, with how long they have been waiting. \\
+\tab{In-Progress} & Tickets in the Jira status \emph{In Progress} that are \textbf{assigned to a person}. \\
+\tab{In-Progress Unassigned} & Tickets in the Jira status \emph{In Progress} that are \textbf{assigned to nobody}. \\
+\tab{Other Teams} & Every ticket in one of these Jira statuses: \emph{Escalated to MDP}, \emph{Pending BM},
+\emph{Pending Customer Response}, \emph{In Progress}, \emph{Pending Tech (Lucky)}, \emph{Pending On-Boarding},
+\emph{Pending Suez Canal}, \emph{Pending Tech (Connect)}, \emph{Pending Fraud}, \emph{Pending Collection}.
+It shows which team has each ticket. \\
+\tab{Pending} & Tickets sent back to the customer (\emph{Pending Customer Response}), with how long they have been
+waiting. \\
 \tab{Productivity} & One row per person with their counts (Section~\ref{sec:ipprod}). \\
 \emph{Done Log} (hidden) & The memory of who closed which ticket (Section~\ref{sec:donelog}). \\
 \bottomrule
 \end{tabularx}
 
+\begin{note}[Earlier layout]
+Until 10 October 2026 this sheet had the tabs \emph{MDB}, \emph{Installment}, \emph{Product}, \emph{Others} and
+\emph{Pending Customer Response}. They were replaced by the tabs above. The team (MDB / Installment / Product / Others)
+is now a \emph{Queue} column on each ticket.
+\end{note}
+
 \subsection{Which tickets appear and who is left out}
 \label{sec:excluded}
 \begin{itemize}
-  \item Tickets whose Jira status is \code{In Progress}, \code{Open}, \code{Reopened}, or \code{Work in progress}
-    appear on the team tabs, with no limit on age. A ticket stuck for a month still shows.
-  \item Tickets in \code{Pending Customer Response} appear on their own tab.
+  \item All the tabs read Jira directly, with \textbf{no limit on age}: a ticket that has been open for a month still
+    shows, and the 30-day limit applies only to the \emph{Done} counts in Productivity.
+  \item A ticket in \emph{In Progress} appears on \tab{In-Progress} or \tab{In-Progress Unassigned}, and also on
+    \tab{Other Teams}, which lists every ticket in all ten statuses. A ticket in \emph{Pending Customer Response}
+    appears on \tab{Pending} and on \tab{Other Teams}.
   \item Tickets assigned to the following people are \textbf{left out of the whole sheet}: \emph{loay.khaled},
     \emph{nourhan.khaled}, \emph{mohanad.maher}, and \emph{Abdullah Mubark}.
-  \item Unassigned tickets are shown with the person \emph{Unassigned}.
+  \item Tickets with no assignee are shown with the person \emph{Unassigned}.
 \end{itemize}
 
-\subsection{Columns of the team tabs}
+\subsection{Columns of the In-Progress tabs}
 \begin{tabularx}{\linewidth}{@{}l L@{}}
 \toprule
 \textbf{Column} & \textbf{Meaning} \\
 \midrule
 Key, Link, Request Type, Summary & Ticket number, link to Jira, contact type, and the ticket summary. \\
+Queue & MDB, Installment, Product or Others, worked out as on the BO sheet (Section~\ref{sec:routing}). \\
 Person & The Jira assignee. \\
 Status & \textbf{Dropdown}: \swatch{sheetblue}~\emph{In Progress} or \swatch{sheetgreen}~\emph{Done}. The
 team sets it by hand. New tickets start as In Progress. \\
@@ -480,7 +497,7 @@ In Progress sheet:
 \toprule
 \textbf{What Jira shows} & \textbf{With Team} \\
 \midrule
-No related ticket & \emph{BO} (or \emph{Customer} on the Pending Customer Response tab) \\
+No related ticket & \emph{BO} (or \emph{Customer} on the Pending tab) \\
 A related ticket whose status does \emph{not} mention CS, for example \emph{In Progress (OPS)} & the name of that
 team, for example \emph{Operations} \\
 Every related ticket has a CS status, for example \emph{Pending CS} or \emph{PENDING RESPONSE (CS)} &
@@ -493,12 +510,16 @@ Every related ticket has a CS status, for example \emph{Pending CS} or \emph{PEN
 the other teams use their statuses differently, the rule can be changed in one place in the program. The column
 \emph{Related Tickets (Jira)} always shows the raw facts so the result can be checked.
 \end{warning}
-Tickets that sit in an escalation status of their own (for example \emph{Pending Tech (Lucky)} or \emph{Pending
-Collection}) are not shown on this sheet; those statuses already name the team.
+On the \tab{Other Teams} tab, a ticket in an escalation status of its own is shown with the team that status names:
+\emph{Escalated to MDP} $\rightarrow$ MDP, \emph{Pending BM} $\rightarrow$ BM, \emph{Pending Tech (Lucky)} $\rightarrow$
+Tech (Lucky), \emph{Pending Tech (Connect)} $\rightarrow$ Tech (Connect), \emph{Pending Fraud} $\rightarrow$ Fraud,
+\emph{Pending Collection} $\rightarrow$ Collection, \emph{Pending On-Boarding} $\rightarrow$ On-Boarding, and
+\emph{Pending Suez Canal} $\rightarrow$ Suez Canal. Only tickets in \emph{In Progress} or \emph{Pending Customer
+Response} also use the related-ticket rule above.
 
 \subsection{The Status dropdown and what ``Done'' means}
 \begin{itemize}
-  \item The program does \textbf{not} add finished tickets to the team tabs automatically. A ticket finished in Jira
+  \item The program does \textbf{not} add finished tickets to the In-Progress tabs automatically. A ticket finished in Jira
     simply leaves the tab, \emph{unless} the team had marked it \emph{Done} in the dropdown (next point).
   \item Instead, the team can mark a ticket \emph{Done} by hand while it is still open in Jira. The choice is kept
     through refreshes, and the ticket is counted as Done in the Productivity tab and in the tab's counters.
@@ -510,20 +531,22 @@ Collection}) are not shown on this sheet; those statuses already name the team.
 \subsection{Counters in the header row}
 The top row of each tab also shows live totals, to the right of the table, so they are always visible:
 \begin{itemize}
-  \item Team tabs: \textbf{Total}, \textbf{In Progress}, and \textbf{Done} (based on the Status dropdown).
-  \item Pending Customer Response: \textbf{Total} and \textbf{Overdue}.
+  \item In-Progress and In-Progress Unassigned: \textbf{Total}, \textbf{In Progress}, and \textbf{Done} (based on the
+    Status dropdown).
+  \item Other Teams: \textbf{Total}.
+  \item Pending: \textbf{Total} and \textbf{Overdue}.
   \item Productivity: \textbf{All people} (the grand total of cases).
 \end{itemize}
 The filter arrows cover only the ticket columns, so sorting or filtering a table never moves the counters.
 
-\subsection{The Pending Customer Response tab}
-Lists the tickets in the Jira status \emph{Pending Customer Response}. It has the same columns as the team tabs, with
+\subsection{The Pending tab}
+Lists the tickets in the Jira status \emph{Pending Customer Response}. It has the same columns as the In-Progress tabs (without \emph{Queue} and \emph{Status}), with
 these differences:
 \begin{itemize}
   \item \textbf{Sent To Customer} replaces ``In Status Since'': the time the ticket was put into that status.
   \item \textbf{Days Waiting For Customer} replaces ``Days In Progress''.
   \item \textbf{Over 48h?} shows \swatch{sheetred}~\textbf{OVERDUE} when the ticket has waited more than
-    \textbf{48 hours}. This is the \emph{only} place in the sheet with an overdue flag. The team tabs have none.
+    \textbf{48 hours}. This is the \emph{only} place in the sheet with an overdue flag.
 \end{itemize}
 
 \subsection{The Productivity tab (In Progress sheet)}
@@ -672,7 +695,8 @@ the workflow file.
 \code{JIRA\_PROJECT} & \code{L1} & Jira project key. \\
 \code{BO\_FROM} & \code{2026-10-01} & BO sheet shows tickets created on or after this date. \\
 \code{BO\_TODO\_STATUSES} & To Do, Clients To Do & Statuses that count as untouched. \\
-\code{INPROGRESS\_STATUSES} & In Progress, Open, Reopened, Work in progress & Statuses shown as in progress. \\
+\code{IN\_PROGRESS\_STATUS} & In Progress & The status shown on the In-Progress tabs. \\
+\code{OTHER\_TEAM\_STATUSES} & the ten statuses listed in Section~5.1 & Statuses shown on the Other Teams tab. \\
 \code{CUSTOMER\_STATUS} & Pending Customer Response & Status for the customer-waiting tab. \\
 \code{PENDING\_SLA\_HOURS} & 48 & Hours before a customer-waiting ticket is OVERDUE. \\
 \code{PRODUCTIVITY\_DAYS} & 30 & Window for the Done counts. \\
@@ -725,7 +749,7 @@ Add or remove a name in the Assignee dropdown & Edit the list \code{TEAM} in \co
 Leave another person out of the In Progress sheet & Add their Jira display name to \code{EXCLUDED\_PEOPLE}. \\
 Change the 48-hour limit & Set \code{PENDING\_SLA\_HOURS}. \\
 Change the BO sheet's start date & Set \code{BO\_FROM} (format \code{YYYY-MM-DD}). \\
-Count other statuses as in progress & Set \code{INPROGRESS\_STATUSES}. \\
+Show other statuses on the Other Teams tab & Set \code{OTHER\_TEAM\_STATUSES}. \\
 Change how often it refreshes & Edit the day and night rules in the Apps Script (Appendix~\ref{app:script}); mind the
 free minutes (Section~\ref{sec:minutes}). \\
 Refresh now & Run the workflow by hand (Section~\ref{sec:manual}). \\
@@ -812,7 +836,7 @@ delete and re-create the service account key) and put the new values only into t
   \item The sheets can be up to 30 minutes behind Jira by day and about 2 hours behind overnight.
   \item Dropdown choices do not write back to Jira.
   \item Done is credited to the person who moved the ticket, so batch closures distort individual numbers.
-  \item Some tickets have no assignee in Jira (about 80 at the time of writing); they appear as \emph{Unassigned} on the team tabs and are left out of
+  \item Some tickets have no assignee in Jira (about 80 at the time of writing); they appear on the \emph{In-Progress Unassigned} tab and are left out of
     Productivity.
   \item The Others tab depends on the keyword list; new request types land there until a keyword is added.
   \item The team has not yet decided where some request types belong (for example \emph{Card is temporarily blocked}
@@ -860,7 +884,7 @@ delete and re-create the service account key) and put the new values only into t
 4 & Routing into MDB, Installment, Product; Others tab; source sheets read for matching. \\
 5 & Assignee dropdown with colours (a Resolved dropdown was added and later removed); Summary and Reporter columns removed. \\
 6 & Automatic refresh with GitHub Actions; schedule tuned to working hours and the free minutes. \\
-7 & In Progress sheet reorganised into team tabs; Status dropdown; 48-hour customer flag; one-row-per-person
+7 & In Progress sheet reorganised into team tabs (replaced on 10 October 2026, see 13); Status dropdown; 48-hour customer flag; one-row-per-person
 productivity; Backlog table. \\
 8 & Day counters (days since arrived, days in progress). \\
 9 & Reliability fix: GitHub's scheduler skipped runs, so the Google timer now starts every run. \\
@@ -868,6 +892,9 @@ productivity; Backlog table. \\
 11 & BO Productivity tab; live totals in the In Progress tabs; this document. \\
 12 & MDP case columns on the BO MDB tab; Comment column on the other BO tabs; \emph{With Team} and \emph{Related Tickets}
 on the In Progress sheet. \\
+13 & Stray dropdowns removed; kept tickets after they are closed; safeguards against an empty Jira answer; the BO MDB
+tab loses the MDP columns and gets a Resolved column again; a Client To Do tab; the In Progress sheet rebuilt as
+In-Progress, In-Progress Unassigned, Other Teams and Pending. \\
 \bottomrule
 \end{tabularx}
 
@@ -900,7 +927,7 @@ on the In Progress sheet. \\
 \begin{itemize}[label=$\square$]
   \item The \emph{Updated} column in the BO sheet shows recent times.
   \item The \emph{Others} tab is empty or understood.
-  \item Pending Customer Response: any \textbf{OVERDUE} rows to chase.
+  \item Pending: any \textbf{OVERDUE} rows to chase.
 \end{itemize}
 \subsection*{Every week (maintainer)}
 \begin{itemize}[label=$\square$]
