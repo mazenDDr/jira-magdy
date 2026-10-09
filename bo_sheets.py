@@ -522,18 +522,13 @@ def todo_tabs(jira, book, ids_by_tab, data_by_tab):
     tabs = {name: [header + extras[name]] for name in extras}
     picks = read_picks(book, list(tabs), ["Key", "Assignee", "Resolved", *KEEP_PICKS])  # kept even if a ticket moves tab
     assignees = {k: v for k, v in picks["Assignee"].items() if v in TEAM}
-    # A ticket stays once it has been listed, even after Jira moves it out of To Do or closes it, so it can be tracked
-    # again later. Its Status column keeps following Jira.
-    listed = set(picks["Key"])
     everything = jira.search(*q_backlog())
     if not everything:  # a real board always has tickets since BO_FROM; an empty answer means something is wrong
         raise RuntimeError(f"Jira returned no tickets created since {BO_FROM}. Refusing to overwrite the sheets.")
-    # Once a ticket is In Progress it belongs to the In Progress sheet and leaves this one.
-    issues = sorted((i for i in everything if i["fields"]["status"]["name"] != IN_PROGRESS_STATUS
-                     and (i["fields"]["status"]["name"] in BO_TODO_STATUSES or i["key"] in listed)),
+    # Only tickets whose Jira status is a to-do status are listed; once one moves on it leaves this sheet.
+    issues = sorted((i for i in everything if i["fields"]["status"]["name"] in BO_TODO_STATUSES),
                     key=lambda i: i["fields"]["created"], reverse=True)
-    todo = sum(i["fields"]["status"]["name"] in BO_TODO_STATUSES for i in everything)
-    print(f"  {todo} to-do tickets since {BO_FROM}, {len(issues) - todo} kept from earlier runs")
+    print(f"  {len(issues)} to-do tickets since {BO_FROM}")
     conflicts = 0
     for i in issues:
         f = i["fields"]
