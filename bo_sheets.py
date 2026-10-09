@@ -63,8 +63,8 @@ STATUS_TEAM = {"Escalated to MDP": "MDP", "Pending BM": "BM", "Pending Customer 
                "Pending Tech (Lucky)": "Tech (Lucky)", "Pending On-Boarding": "On-Boarding",
                "Pending Suez Canal": "Suez Canal", "Pending Tech (Connect)": "Tech (Connect)",
                "Pending Fraud": "Fraud", "Pending Collection": "Collection"}
-TAB_INPROGRESS, TAB_UNASSIGNED = "In-Progress", "In-Progress Unassigned"
-TAB_OTHER, TAB_PENDING = "Other Teams", "Pending"
+TAB_INPROGRESS, TAB_UNASSIGNED = "In-progress", "in-progress unassigned"  # as named in the sheet
+TAB_OTHER, TAB_PENDING = "other teams", "pending"
 LEGACY_TABS = ["MDB", "Installment", "Product", "Others", "Pending Customer Response", "In Progress", "Pending Other Teams"]
 PRODUCTIVITY_DAYS = int(os.environ.get("PRODUCTIVITY_DAYS", "30"))
 PENDING_SLA_HOURS = int(os.environ.get("PENDING_SLA_HOURS", "48"))  # flag shown on the Pending Customer tab only
@@ -234,24 +234,39 @@ def safe(cell):
     return cell
 
 
+def tab_cache(book):
+    """{title: worksheet}, read once per spreadsheet."""
+    return book.__dict__.setdefault("_ws_cache", {w.title: w for w in book.worksheets()})
+
+
+def find_title(cache, title):
+    """The existing tab with this name. Google treats names as the same whatever their capital letters, so an
+    existing "In-progress" is used for "In-Progress" instead of failing to create a second one."""
+    return next((t for t in cache if t.lower() == title.lower()), None)
+
+
 def get_ws(book, title, ncols):
-    """Worksheet by title, created if missing. Titles are read once per spreadsheet and cached."""
-    cache = book.__dict__.setdefault("_ws_cache", {w.title: w for w in book.worksheets()})
-    if title not in cache:
+    """Worksheet by title, created if missing."""
+    cache = tab_cache(book)
+    found = find_title(cache, title)
+    if found is None:
+        found = title
         cache[title] = book.add_worksheet(title, rows=2, cols=ncols)
-    return cache[title]
+    return cache[found]
 
 
 def delete_tab(book, title):
-    cache = book.__dict__.setdefault("_ws_cache", {w.title: w for w in book.worksheets()})
-    if title in cache and len(cache) > 1:
-        book.del_worksheet(cache.pop(title))
+    cache = tab_cache(book)
+    found = find_title(cache, title)
+    if found is not None and len(cache) > 1:
+        book.del_worksheet(cache.pop(found))
 
 
 def set_order(book, titles):
-    cache = book.__dict__["_ws_cache"]
+    cache = tab_cache(book)
     book.batch_update({"requests": [{"updateSheetProperties": {
-        "properties": {"sheetId": cache[t].id, "index": n}, "fields": "index"}} for n, t in enumerate(titles)]})
+        "properties": {"sheetId": cache[find_title(cache, t)].id, "index": n}, "fields": "index"}}
+        for n, t in enumerate(titles)]})
 
 
 def write_tab(book, title, rows, number_formats=None, dropdowns=None, hidden=False, filter_cols=None):
@@ -292,7 +307,7 @@ def write_tab(book, title, rows, number_formats=None, dropdowns=None, hidden=Fal
             "condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": c} for c in choices]},
             "showCustomUi": True, "strict": True}}})
     body = [rows[0]] + [[safe(c) for c in r] for r in rows[1:]]
-    book.__dict__.setdefault("_pending", []).append({"title": title, "reqs": reqs, "rows": body})
+    book.__dict__.setdefault("_pending", []).append({"title": ws.title, "reqs": reqs, "rows": body})
     return ws
 
 
@@ -405,8 +420,8 @@ def read_source(gc, sheet_id, tab, columns):
 
 def read_picks(book, titles, columns):
     """Dropdown picks already made in the sheet, {column: {ticket key: pick}}, so a refresh doesn't wipe them."""
-    cache = book.__dict__.setdefault("_ws_cache", {w.title: w for w in book.worksheets()})
-    found = [t for t in titles if t in cache]
+    cache = tab_cache(book)
+    found = list(dict.fromkeys(find_title(cache, t) for t in titles if find_title(cache, t)))
     picks = {c: {} for c in columns}
     if not found:
         return picks
@@ -734,7 +749,7 @@ def q_reopened(hours):
 
 def load_done_log(book):
     """The saved history of who closed what: ({ticket: (when, who)}, time of last sync)."""
-    cache = book.__dict__.setdefault("_ws_cache", {w.title: w for w in book.worksheets()})
+    cache = tab_cache(book)
     if DONE_LOG_TAB not in cache:
         return {}, None
     values = book.values_batch_get([f"'{DONE_LOG_TAB}'"])["valueRanges"][0].get("values", [])
@@ -835,8 +850,10 @@ def progress_book(jira, book, ids_by_tab, log):
     write_tab(book, DONE_LOG_TAB, done_log_rows(entries), hidden=True)  # kept for the next run, hidden from view
     flush(book)
     apply_colors(book, specs)
+    current = {t.lower() for t in (TAB_INPROGRESS, TAB_UNASSIGNED, TAB_OTHER, TAB_PENDING)}
     for old in LEGACY_TABS:  # the tabs of the earlier layout
-        delete_tab(book, old)
+        if old.lower() not in current:
+            delete_tab(book, old)
     set_order(book, [TAB_INPROGRESS, TAB_UNASSIGNED, TAB_OTHER, TAB_PENDING, "Productivity", DONE_LOG_TAB])
 
 
