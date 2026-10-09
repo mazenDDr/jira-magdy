@@ -624,7 +624,7 @@ def team_rows(jira, items, ids_by_tab, days_label="Days In Progress"):
     since_col, created_col = letter(header, "In Status Since"), letter(header, "Created")
     rows = [header + ["", Formula('="Total: "&COUNTA(A2:A)')]]
     oldest = datetime.min.replace(tzinfo=TZ)
-    items = sorted(items, key=lambda x: (person(x[0]["fields"].get("assignee")), x[0]["fields"]["status"]["name"], x[1] or oldest))
+    items = sorted(items, key=lambda x: x[1] or oldest)  # longest in its status first
     for n, (i, since) in enumerate(items, start=2):
         f = i["fields"]
         rows.append([i["key"], f"{jira.base}/browse/{i['key']}", route(i, ids_by_tab), request_type(f),
