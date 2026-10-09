@@ -617,14 +617,14 @@ def letter(header, name):
     return chr(ord("A") + header.index(name))
 
 
-def team_rows(jira, items, ids_by_tab):
+def team_rows(jira, items, ids_by_tab, days_label="Days In Progress"):
     """In-progress tickets for one team tab. items: [(issue, in-status-since)]."""
     header = ["Key", "Link", "Queue", "Request Type", "Person", "Jira Status",
-              "In Status Since", "Created", "Days Since Arrived", "Days In Progress", "Comment"]
+              "In Status Since", "Created", "Days Since Arrived", days_label, "Comment"]
     since_col, created_col = letter(header, "In Status Since"), letter(header, "Created")
     rows = [header + ["", Formula('="Total: "&COUNTA(A2:A)')]]
     oldest = datetime.min.replace(tzinfo=TZ)
-    items = sorted(items, key=lambda x: (person(x[0]["fields"].get("assignee")), x[1] or oldest))
+    items = sorted(items, key=lambda x: (person(x[0]["fields"].get("assignee")), x[0]["fields"]["status"]["name"], x[1] or oldest))
     for n, (i, since) in enumerate(items, start=2):
         f = i["fields"]
         rows.append([i["key"], f"{jira.base}/browse/{i['key']}", route(i, ids_by_tab), request_type(f),
@@ -789,9 +789,11 @@ def progress_book(jira, book, ids_by_tab, log):
         if excluded(who):
             continue
         name, since = i["fields"]["status"]["name"], status_since(i)
-        if name == IN_PROGRESS_STATUS:
-            (assigned if i["fields"].get("assignee") else unassigned).append((i, since))
+        if name == IN_PROGRESS_STATUS and i["fields"].get("assignee"):
+            assigned.append((i, since))
             counts[who]["progress"] += 1
+        if name in OTHER_TEAM_STATUSES and not i["fields"].get("assignee"):  # nobody owns it, whatever its status
+            unassigned.append((i, since))
         if name == CUSTOMER_STATUS:
             customer.append((i, since))
             counts[who]["customer"] += 1
@@ -813,11 +815,12 @@ def progress_book(jira, book, ids_by_tab, log):
 
     specs = []
     hours = {"Days Since Arrived": "0"}
-    for title, items in ((TAB_INPROGRESS, assigned), (TAB_UNASSIGNED, unassigned)):
-        rows = team_rows(jira, items, ids_by_tab)
-        ws = write_tab(book, title, rows, {**hours, "Days In Progress": "0"}, filter_cols=rows[0].index(""))
+    for title, items, label in ((TAB_INPROGRESS, assigned, "Days In Progress"),
+                                (TAB_UNASSIGNED, unassigned, "Days In Status")):
+        rows = team_rows(jira, items, ids_by_tab, label)
+        ws = write_tab(book, title, rows, {**hours, label: "0"}, filter_cols=rows[0].index(""))
         specs += [(ws, rows[0].index("Jira Status"), STATUS_COLORS),
-                  (ws, rows[0].index("Days In Progress"), "#e06666")]  # the longer in progress, the redder
+                  (ws, rows[0].index(label), "#e06666")]  # the longer in progress, the redder
     rows = other_rows(jira, other, ids_by_tab)
     ws = write_tab(book, TAB_OTHER, rows, {**hours, "Days In Status": "0"}, filter_cols=rows[0].index(""))
     specs += [(ws, rows[0].index("Jira Status"), STATUS_COLORS),
