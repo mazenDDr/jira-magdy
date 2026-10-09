@@ -791,7 +791,8 @@ def progress_book(jira, book, ids_by_tab, log):
     done_items = []
     for start in range(0, len(wanted), 100):
         for i in jira.search(f"key in ({', '.join(wanted[start:start + 100])})", FIELDS + [VALIDATION_FIELD]):
-            if not excluded(person(i["fields"].get("assignee"))):
+            # a ticket opened again leaves the done tab (it shows up on the In-progress tabs instead)
+            if i["fields"]["status"]["name"] in done_statuses(jira) and not excluded(person(i["fields"].get("assignee"))):
                 closed = entries.get(i["key"])
                 done_items.append((i, closed[0] if closed else None, closed[1] if closed else ""))
     for when, who in entries.values():  # closed in Jira: credited to whoever moved the ticket
