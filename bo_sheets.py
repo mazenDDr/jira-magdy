@@ -38,7 +38,7 @@ KEYWORDS = {
     "Installment": ["installment", "unable to pay due"],
     "MDB": ["refund transaction", "purchase failed", "deposit didn't reflect", "pos transfer",
             "unable to deposit", "unable to withdraw"],
-    "Product": ["different balance"],
+    "Product": ["different balance", "lucky close card error"],
 }
 # Names in the Assignee dropdown, used exactly as given. Picked by hand in the sheet, never matched to Jira.
 TEAM = ["Mego", "Helana", "Abdallah", "Heba", "Reem", "Samy", "Bassem", "Mayar"]
