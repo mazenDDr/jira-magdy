@@ -303,6 +303,8 @@ are removed only by deleting them by hand.
 \tab{Installment} & To-do tickets that belong to the Installment team. \\
 \tab{Product} & To-do tickets that belong to the Product team. \\
 \tab{Others} & To-do tickets that match no team. Check it regularly. \\
+\tab{Client To Do} & Tickets whose Jira status is \emph{Clients To Do} (waiting for the client to act). They appear
+only here, whatever their request type. \\
 \bottomrule
 \end{tabularx}
 
@@ -324,34 +326,16 @@ Updated & When the ticket was last changed in Jira (any comment, field change, o
 
 The Summary column is deliberately not shown on this sheet.
 
-\subsection{Extra columns copied from the source sheets}
+\subsection{The Comment column and free space}
 \label{sec:extra}
-To the right of \emph{Updated}, each tab gets columns that the program copies from the team's source sheet. The row
-is found by the ticket number, as in Section~\ref{sec:routing}.
-
-\begin{tabularx}{\linewidth}{@{}l L@{}}
-\toprule
-\textbf{Tab} & \textbf{Columns added (and where they come from)} \\
-\midrule
-\tab{MDB} & \emph{Card \#}, \emph{Acc No}, \emph{Description}, \emph{Amount}, \emph{Disputed Amount If Partial},
-\emph{Project}, \emph{BO Owner}, \emph{Validation}: the same-named columns of the MDP sheet. \\
-\tab{Installment, Product, Others} & \emph{Comment}: Jira's \emph{L1 Validation Description} field (see below). \\
-\bottomrule
-\end{tabularx}
-
 \begin{itemize}
-  \item A new ticket usually is not in the source sheet yet, because people fill those sheets by hand. Its cells stay
-    empty and fill in automatically at the first refresh after the row appears.
+  \item The \tab{MDB} tab has only the columns listed above. (An earlier version copied case columns such as Card \#, Acc
+    No and Validation from the MDP sheet; they were removed on request.)
+  \item Every other tab (\tab{Installment}, \tab{Product}, \tab{Others}, \tab{Client To Do}) has one more column at the
+    end, \emph{Comment}.
   \item \emph{Comment} shows what the team wrote in the Jira field \emph{L1 Validation Description} on the ticket, on one
     line. It is not the \emph{Reply to Customer (Public)} field. A \emph{Comment} typed by hand in this sheet is kept as
     long as Jira has nothing in that field; as soon as Jira has text, Jira wins.
-  \item \emph{Card \#} and \emph{Acc No} are stored as text, so numbers such as \code{0538} keep their leading zero.
-  \item \emph{Validation} is a dropdown that uses the same list of choices as the MDP sheet's own Validation column
-    (the program reads that list from the MDP sheet on every run). It also accepts values already in the cells.
-    All other copied columns, and every \emph{Comment} column, are plain text with no dropdown, with one exception:
-  \item \emph{Project} (MDB tab) is a dropdown with the choices Lucky, Chat, Bsata, Hyper, NTG, Mozare3, and Basata. A
-    different value from the MDP sheet, such as ``Hyper One'', is still accepted. A choice made in the sheet is kept
-    while the MDP sheet has no project for that ticket; once the MDP sheet has one, it replaces the choice.
   \item Every tab is left with free rows and columns (at least 1\,000 rows and 26 columns), so people can type below and
     beside the tables as in any normal sheet.
 \end{itemize}

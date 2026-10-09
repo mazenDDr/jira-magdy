@@ -67,17 +67,13 @@ VALIDATION_FIELD = "customfield_10951"  # Jira "L1 Validation Description" -> th
 RELATED_FIELD = "customfield_11301"  # Jira "Related Tickets Status", e.g. "Operations (OPS-1934): Pending CS |"
 # Columns copied from each source sheet into the BO tabs: {column on our tab: header in the source sheet}.
 EXTRA_ROWS, MIN_ROWS, EXTRA_COLS, MIN_COLS = 500, 1000, 6, 26  # free space left around every table
-PROJECT_CHOICES = ["Lucky", "Chat", "Bsata", "Hyper", "NTG", "Mozare3", "Basata"]  # MDB "Project" dropdown
-KEEP_PICKS = ["Comment", "Project"]  # typed or picked in the sheet; kept when the source sheet has nothing
-SOURCE_DROPDOWNS = {"MDB": ["Validation"]}  # new columns that keep a dropdown, using the source sheet's own list
-SOURCE_COLUMNS = {
-    "MDB": {"Card #": "card #", "Acc No": "acc no", "Description": "descrebtion", "Amount": "amount",
-            "Disputed Amount If Partial": "disputed amount if partial", "Project": "project",
-            "BO Owner": "bo owner", "Validation": "validation"},
+KEEP_PICKS = ["Comment"]  # typed in the sheet; kept while Jira has nothing
+SOURCE_COLUMNS = {  # the old source-sheet comments, read only to recognise (and drop) leftovers of them
     "Installment": {"Comment": "first comment"},
     "Product": {"Comment": "comment"},
 }
-TEXT_COLUMNS = {"Card #", "Acc No"}  # keep leading zeros
+CLIENT_TAB = "Client To Do"  # tickets in these Jira statuses get a tab of their own
+CLIENT_STATUSES = [x.strip() for x in os.environ.get("CLIENT_TODO_STATUSES", "Clients To Do").split(",") if x.strip()]
 FIELDS = ["summary", "status", "assignee", "reporter", "created", "updated",
           "resolutiondate", REQUEST_TYPE_FIELD]
 
@@ -244,7 +240,7 @@ def set_order(book, titles):
         "properties": {"sheetId": cache[t].id, "index": n}, "fields": "index"}} for n, t in enumerate(titles)]})
 
 
-def write_tab(book, title, rows, number_formats=None, dropdowns=None, hidden=False, filter_cols=None, loose=()):
+def write_tab(book, title, rows, number_formats=None, dropdowns=None, hidden=False, filter_cols=None):
     """Queue a tab's new contents. flush() sends every queued tab to Google in three calls."""
     ncols, nrows = len(rows[0]), len(rows)
     ws = get_ws(book, title, ncols)
@@ -280,7 +276,7 @@ def write_tab(book, title, rows, number_formats=None, dropdowns=None, hidden=Fal
     for header, choices in (dropdowns or {}).items():
         reqs.append({"setDataValidation": {"range": cell_range(rows[0].index(header)), "rule": {
             "condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": c} for c in choices]},
-            "showCustomUi": True, "strict": header not in loose}}})
+            "showCustomUi": True, "strict": True}}})
     body = [rows[0]] + [[safe(c) for c in r] for r in rows[1:]]
     book.__dict__.setdefault("_pending", []).append({"title": title, "reqs": reqs, "rows": body})
     return ws
@@ -360,12 +356,12 @@ def norm(text):
     return " ".join((text or "").lower().split())
 
 
-def read_source(gc, sheet_id, tab, columns, dropdown_labels=()):
+def read_source(gc, sheet_id, tab, columns):
     """Read a source sheet once.
 
-    Returns (every ticket number mentioned, {ticket: {our column: value}}, {our column: dropdown options})."""
+    Returns (every ticket number mentioned, {ticket: {our column: value}})."""
     book = gc.open_by_key(sheet_id)
-    found, data, dropdowns = set(), {}, {}
+    found, data = set(), {}
     for ws in book.worksheets():
         if tab and ws.title.strip().lower() != tab.strip().lower():
             continue
@@ -381,9 +377,6 @@ def read_source(gc, sheet_id, tab, columns, dropdown_labels=()):
             continue
         header = [norm(h) for h in values[0]]
         wanted = {label: header.index(h) for label, h in columns.items() if h in header}
-        for label in dropdown_labels:  # the dropdown list the source sheet itself uses on that column
-            if label in wanted:
-                dropdowns[label] = source_dropdown(book, ws, wanted[label], values)
         top = max(counts.values(), default=0)
         key_cols = [c for c, n in counts.items() if n >= 50 and n >= 0.1 * top]
         for row in values[1:]:
@@ -393,21 +386,7 @@ def read_source(gc, sheet_id, tab, columns, dropdown_labels=()):
             for c in key_cols:
                 if c < len(row) and TICKET_ID.fullmatch(row[c].strip()):
                     data.setdefault(row[c].strip().upper(), {}).update(cells)  # a later row fills or updates
-    return found, data, dropdowns
-
-
-def source_dropdown(book, ws, col, values):
-    """Options of the dropdown on a source column, read from its most recent filled row (rules change over time)."""
-    row = next((n for n in range(len(values), 1, -1) if col < len(values[n - 1]) and values[n - 1][col].strip()), 2)
-    letter_ = chr(ord("A") + col) if col < 26 else "A"
-    r = book.client.request("get", f"https://sheets.googleapis.com/v4/spreadsheets/{book.id}", params={
-        "fields": "sheets.data.rowData.values.dataValidation", "includeGridData": "true",
-        "ranges": f"'{ws.title}'!{letter_}{row}:{letter_}{row}"}).json()
-    try:
-        rule = r["sheets"][0]["data"][0]["rowData"][0]["values"][0]["dataValidation"]["condition"]
-        return [v["userEnteredValue"] for v in rule["values"]] if rule["type"] == "ONE_OF_LIST" else []
-    except (KeyError, IndexError):
-        return []
+    return found, data
 
 
 def read_picks(book, titles, columns):
@@ -505,12 +484,12 @@ def bo_productivity_rows(header, tab_names):
     return rows
 
 
-def todo_tabs(jira, book, ids_by_tab, data_by_tab, lists_by_tab):
+def todo_tabs(jira, book, ids_by_tab, data_by_tab):
     """Build the MDB / Installment / Product / Others tabs from the L1 board's to-do tickets."""
     header = ["Key", "Link", "Request Type", "Customer Ticket", "Status",
               "Assignee", "Created", "Updated"]
-    # MDB gets the MDP sheet's case columns; every other tab gets a Comment column.
-    extras = {name: list(SOURCE_COLUMNS["MDB"]) if name == "MDB" else ["Comment"] for name in [*SOURCES, "Others"]}
+    # Every tab except MDB also gets a Comment column. Tickets in a "Clients To Do" status go to their own tab.
+    extras = {name: [] if name == "MDB" else ["Comment"] for name in [*SOURCES, "Others", CLIENT_TAB]}
     tabs = {name: [header + extras[name]] for name in extras}
     picks = read_picks(book, list(tabs), ["Key", "Assignee", *KEEP_PICKS])  # kept even if a ticket moves tab
     assignees = {k: v for k, v in picks["Assignee"].items() if v in TEAM}
@@ -527,40 +506,28 @@ def todo_tabs(jira, book, ids_by_tab, data_by_tab, lists_by_tab):
     conflicts = 0
     for i in issues:
         f = i["fields"]
-        tab = route(i, ids_by_tab)
+        client = f["status"]["name"] in CLIENT_STATUSES
+        tab = CLIENT_TAB if client else route(i, ids_by_tab)
         in_sheets = [t for t, ids in ids_by_tab.items()
                      if i["key"] in ids or customer_ref(f["summary"]) in ids]
-        conflicts += bool(in_sheets) and tab not in in_sheets
+        conflicts += bool(in_sheets) and tab not in in_sheets and not client
         who = assignees.get(i["key"], "")
         ref = customer_ref(f["summary"])
         found = data_by_tab.get(tab, {})
         info = found.get(i["key"].upper()) or found.get(ref.upper()) or {}
         extra = []
-        for label in extras[tab]:
-            if label == "Comment":
-                # The Comment is Jira's "L1 Validation Description". Something typed by hand stays while Jira has
-                # none; a leftover from the old source-sheet comment is dropped.
-                typed = picks["Comment"].get(i["key"], "")
-                value = " ".join(adf_text(f.get(VALIDATION_FIELD)).split()) or (
-                    typed if typed != info.get("Comment", "") else "")
-            else:
-                value = info.get(label) or (picks[label].get(i["key"], "") if label in KEEP_PICKS else "")
-            extra.append("'" + value if value and label in TEXT_COLUMNS else value)
+        if "Comment" in extras[tab]:
+            # The Comment is Jira's "L1 Validation Description". Something typed by hand stays while Jira has
+            # none; a leftover from the old source-sheet comment is dropped.
+            typed = picks["Comment"].get(i["key"], "")
+            extra.append(" ".join(adf_text(f.get(VALIDATION_FIELD)).split()) or (
+                typed if typed != info.get("Comment", "") else ""))
         tabs[tab].append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f),
                           ref, f["status"]["name"], who,
                           fmt(parse_dt(f["created"])), fmt(parse_dt(f["updated"])), *extra])
     specs = []
     for tab, rows in tabs.items():
-        dropdowns = {"Assignee": TEAM}
-        for label, options in lists_by_tab.get(tab, {}).items():
-            if options:  # also allow what is already in the cells, so no cell is flagged as invalid
-                at = rows[0].index(label)
-                present = {r[at] for r in rows[1:] if len(r) > at}
-                dropdowns[label] = options + sorted(v for v in present if v and v not in options)
-        loose = tuple(SOURCE_DROPDOWNS.get(tab, ()))
-        if tab == "MDB":
-            dropdowns["Project"], loose = PROJECT_CHOICES, loose + ("Project",)
-        ws = write_tab(book, tab, rows, dropdowns=dropdowns, loose=loose)
+        ws = write_tab(book, tab, rows, dropdowns={"Assignee": TEAM})
         shown = {r[header.index("Status")] for r in rows[1:]}
         colours = {name: DONE_COLOR for name in done_statuses(jira)}
         colours.update(STATUS_COLORS)
@@ -849,16 +816,14 @@ def main():
         jira.prefetch(*q_reopened(hours))
     jira._pool.submit(done_statuses, jira)
     with ThreadPoolExecutor(len(SOURCES)) as pool:  # each source sheet gets its own Google client
-        futures = {tab: pool.submit(read_source, google(), sid, st, SOURCE_COLUMNS.get(tab, {}),
-                                    SOURCE_DROPDOWNS.get(tab, ()))
+        futures = {tab: pool.submit(read_source, google(), sid, st, SOURCE_COLUMNS.get(tab, {}))
                    for tab, (sid, st) in SOURCES.items()}
         sources = {tab: f.result() for tab, f in futures.items()}
-    ids_by_tab = {tab: ids for tab, (ids, _, _) in sources.items()}
-    data_by_tab = {tab: data for tab, (_, data, _) in sources.items()}
-    lists_by_tab = {tab: lists for tab, (_, _, lists) in sources.items()}
+    ids_by_tab = {tab: ids for tab, (ids, _) in sources.items()}
+    data_by_tab = {tab: data for tab, (_, data) in sources.items()}
 
     print("Sheet 1: BO to-do tickets by team")
-    todo_tabs(jira, book1, ids_by_tab, data_by_tab, lists_by_tab)
+    todo_tabs(jira, book1, ids_by_tab, data_by_tab)
     drop_default_tab(book1)
     print("  ", book1.url)
 
