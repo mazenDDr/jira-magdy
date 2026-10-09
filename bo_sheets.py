@@ -41,7 +41,6 @@ KEYWORDS = {
 }
 # Names in the Assignee dropdown, used exactly as given. Picked by hand in the sheet, never matched to Jira.
 TEAM = ["Mego", "Helana", "Abdallah", "Heba", "Reem", "Samy", "Bassem", "Mayar"]
-RESOLVED_CHOICES = ["Solved", "Pending for customer response", "On hold"]
 # tab name -> (source spreadsheet id, tab title to read, or "" for every tab)
 SOURCES = {
     "MDB": (os.environ.get("MDB_SOURCE_ID", "1zkHFJxgOLRZXEFXcGV_LSjshLmLhXwxOvHLe9MspsV4"), ""),
@@ -64,6 +63,7 @@ INSTALLMENT_WORDS = [w.strip().lower() for w in os.environ.get("INSTALLMENT_KEYW
 MDB_WORDS = [w.strip().lower() for w in os.environ.get("MDB_KEYWORDS", "").split(",") if w.strip()]
 
 REQUEST_TYPE_FIELD = "customfield_11163"
+VALIDATION_FIELD = "customfield_10951"  # Jira "L1 Validation Description" -> the Comment column
 RELATED_FIELD = "customfield_11301"  # Jira "Related Tickets Status", e.g. "Operations (OPS-1934): Pending CS |"
 # Columns copied from each source sheet into the BO tabs: {column on our tab: header in the source sheet}.
 EXTRA_ROWS, MIN_ROWS, EXTRA_COLS, MIN_COLS = 500, 1000, 6, 26  # free space left around every table
@@ -309,7 +309,6 @@ def rgb(hex_color):
     return {"red": int(h[0:2], 16) / 255, "green": int(h[2:4], 16) / 255, "blue": int(h[4:6], 16) / 255}
 
 
-RESOLVED_COLORS = {"Solved": "#b7e1cd", "Pending for customer response": "#fce8b2", "On hold": "#f4c7c3"}
 TEAM_COLORS = dict(zip(TEAM, ["#c9daf8", "#d9d2e9", "#d0e0e3", "#ffe5d0", "#fff2cc",
                               "#d9ead3", "#ead1dc", "#cfe2f3"]))
 DONE_COLOR = "#b7e1cd"
@@ -450,7 +449,7 @@ def q_todo():
 
 
 def q_backlog():
-    return (f'project = {PROJECT} AND created >= "{BO_FROM}"', FIELDS)
+    return (f'project = {PROJECT} AND created >= "{BO_FROM}"', FIELDS + [VALIDATION_FIELD])
 
 
 def q_open():
@@ -476,26 +475,26 @@ def backlog_tab(jira, book):
 
 
 def bo_productivity_rows(header, tab_names):
-    """Live counts straight from the team tabs, so they follow the Resolved and Assignee dropdowns."""
-    res, asg = letter(header, "Resolved"), letter(header, "Assignee")
-    count = lambda tab, col, value: f"=COUNTIF('{tab}'!{col}2:{col},\"{value}\")"
-    team = [["Team", "Total Tickets", *RESOLVED_CHOICES, "Not Set Yet"]]
-    for n, tab in enumerate(tab_names, start=2):
-        team.append([tab, Formula(f"=COUNTA('{tab}'!A2:A)"),
-                     *[Formula(count(tab, res, c)) for c in RESOLVED_CHOICES],
-                     Formula(f"=B{n}-SUM(C{n}:E{n})")])
+    """Live counts straight from the team tabs, so they follow the Assignee dropdown."""
+    asg, status = letter(header, "Assignee"), letter(header, "Status")
+    count = lambda tab, col, value: f"COUNTIF('{tab}'!{col}2:{col},\"{value}\")"
+    team = [["Team", "Total Tickets", "Still To Do"]]
+    for tab in tab_names:
+        todo = "+".join(count(tab, status, name) for name in BO_TODO_STATUSES)
+        team.append([tab, Formula(f"=COUNTA('{tab}'!A2:A)"), Formula(f"={todo}")])
     last = len(team)
-    team.append(["Total", *[Formula(f"=SUM({chr(ord('B') + k)}2:{chr(ord('B') + k)}{last})") for k in range(5)]])
+    team.append(["Total", *[Formula(f"=SUM({chr(ord('B') + k)}2:{chr(ord('B') + k)}{last})") for k in range(2)]])
 
+    first_col = len(team[0]) + 1  # the person table starts one blank column after the team table
+    col = lambda k: chr(ord("A") + first_col + k)
     people = [["Person", *tab_names, "Total"]]
     for n, name in enumerate(TEAM, start=2):
-        people.append([name, *[Formula(count(tab, asg, name)) for tab in tab_names],
-                       Formula(f"=SUM(I{n}:{chr(ord('H') + len(tab_names))}{n})")])
-    first, end = 2, len(people)
+        people.append([name, *[Formula("=" + count(tab, asg, name)) for tab in tab_names],
+                       Formula(f"=SUM({col(1)}{n}:{col(len(tab_names))}{n})")])
+    end = len(people)
     people.append(["No one picked yet", *[
-        Formula(f"=COUNTA('{tab}'!A2:A)-SUM({chr(ord('I') + k)}{first}:{chr(ord('I') + k)}{end})")
-        for k, tab in enumerate(tab_names)],
-        Formula(f"=SUM(I{end + 1}:{chr(ord('H') + len(tab_names))}{end + 1})")])
+        Formula(f"=COUNTA('{tab}'!A2:A)-SUM({col(k + 1)}2:{col(k + 1)}{end})") for k, tab in enumerate(tab_names)],
+        Formula(f"=SUM({col(1)}{end + 1}:{col(len(tab_names))}{end + 1})")])
 
     width_t, width_p = len(team[0]), len(people[0])
     rows = []
@@ -509,12 +508,11 @@ def bo_productivity_rows(header, tab_names):
 def todo_tabs(jira, book, ids_by_tab, data_by_tab, lists_by_tab):
     """Build the MDB / Installment / Product / Others tabs from the L1 board's to-do tickets."""
     header = ["Key", "Link", "Request Type", "Customer Ticket", "Status",
-              "Assignee", "Created", "Updated", "Resolved"]
+              "Assignee", "Created", "Updated"]
     # MDB gets the MDP sheet's case columns; every other tab gets a Comment column.
     extras = {name: list(SOURCE_COLUMNS["MDB"]) if name == "MDB" else ["Comment"] for name in [*SOURCES, "Others"]}
     tabs = {name: [header + extras[name]] for name in extras}
-    picks = read_picks(book, list(tabs), ["Key", "Resolved", "Assignee", *KEEP_PICKS])  # kept even if a ticket moves tab
-    choices = picks["Resolved"]
+    picks = read_picks(book, list(tabs), ["Key", "Assignee", *KEEP_PICKS])  # kept even if a ticket moves tab
     assignees = {k: v for k, v in picks["Assignee"].items() if v in TEAM}
     # A ticket stays once it has been listed, even after Jira moves it out of To Do or closes it, so it can be tracked
     # again later. Its Status column keeps following Jira.
@@ -539,15 +537,21 @@ def todo_tabs(jira, book, ids_by_tab, data_by_tab, lists_by_tab):
         info = found.get(i["key"].upper()) or found.get(ref.upper()) or {}
         extra = []
         for label in extras[tab]:
-            value = info.get(label) or (picks[label].get(i["key"], "") if label in KEEP_PICKS else "")
+            if label == "Comment":
+                # The Comment is Jira's "L1 Validation Description". Something typed by hand stays while Jira has
+                # none; a leftover from the old source-sheet comment is dropped.
+                typed = picks["Comment"].get(i["key"], "")
+                value = " ".join(adf_text(f.get(VALIDATION_FIELD)).split()) or (
+                    typed if typed != info.get("Comment", "") else "")
+            else:
+                value = info.get(label) or (picks[label].get(i["key"], "") if label in KEEP_PICKS else "")
             extra.append("'" + value if value and label in TEXT_COLUMNS else value)
         tabs[tab].append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f),
                           ref, f["status"]["name"], who,
-                          fmt(parse_dt(f["created"])), fmt(parse_dt(f["updated"])),
-                          choices.get(i["key"], ""), *extra])
+                          fmt(parse_dt(f["created"])), fmt(parse_dt(f["updated"])), *extra])
     specs = []
     for tab, rows in tabs.items():
-        dropdowns = {"Resolved": RESOLVED_CHOICES, "Assignee": TEAM}
+        dropdowns = {"Assignee": TEAM}
         for label, options in lists_by_tab.get(tab, {}).items():
             if options:  # also allow what is already in the cells, so no cell is flagged as invalid
                 at = rows[0].index(label)
@@ -560,8 +564,7 @@ def todo_tabs(jira, book, ids_by_tab, data_by_tab, lists_by_tab):
         shown = {r[header.index("Status")] for r in rows[1:]}
         colours = {name: DONE_COLOR for name in done_statuses(jira)}
         colours.update(STATUS_COLORS)
-        specs += [(ws, header.index("Resolved"), RESOLVED_COLORS),
-                  (ws, header.index("Assignee"), TEAM_COLORS),
+        specs += [(ws, header.index("Assignee"), TEAM_COLORS),
                   (ws, header.index("Status"), {k: v for k, v in colours.items() if k in shown})]
     specs += backlog_tab(jira, book)
     write_tab(book, "Productivity", bo_productivity_rows(header, list(tabs)), filter_cols=0)

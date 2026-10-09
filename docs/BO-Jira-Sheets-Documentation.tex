@@ -319,7 +319,6 @@ Status & The Jira status (\emph{To Do} or \emph{Clients To Do}). \\
 Assignee & \textbf{Dropdown} with the team names. Chosen by hand in the sheet. Not connected to Jira. \\
 Created & When the ticket was created in Jira. \\
 Updated & When the ticket was last changed in Jira (any comment, field change, or status change). \\
-Resolved & \textbf{Dropdown}: \emph{Solved}, \emph{Pending for customer response}, \emph{On hold}. Chosen by hand. \\
 \bottomrule
 \end{tabularx}
 
@@ -327,7 +326,7 @@ The Summary column is deliberately not shown on this sheet.
 
 \subsection{Extra columns copied from the source sheets}
 \label{sec:extra}
-To the right of \emph{Resolved}, each tab gets columns that the program copies from the team's source sheet. The row
+To the right of \emph{Updated}, each tab gets columns that the program copies from the team's source sheet. The row
 is found by the ticket number, as in Section~\ref{sec:routing}.
 
 \begin{tabularx}{\linewidth}{@{}l L@{}}
@@ -336,18 +335,16 @@ is found by the ticket number, as in Section~\ref{sec:routing}.
 \midrule
 \tab{MDB} & \emph{Card \#}, \emph{Acc No}, \emph{Description}, \emph{Amount}, \emph{Disputed Amount If Partial},
 \emph{Project}, \emph{BO Owner}, \emph{Validation}: the same-named columns of the MDP sheet. \\
-\tab{Installment} & \emph{Comment}: the \emph{First Comment} column of the Credit Sheet. \\
-\tab{Product} & \emph{Comment}: the \emph{Comment} column of the FO/BO sheet (often an escalation ticket such as
-\code{TEC-14867}). \\
-\tab{Others} & \emph{Comment}: no source sheet, so it starts empty and can be typed by hand. \\
+\tab{Installment, Product, Others} & \emph{Comment}: Jira's \emph{L1 Validation Description} field (see below). \\
 \bottomrule
 \end{tabularx}
 
 \begin{itemize}
   \item A new ticket usually is not in the source sheet yet, because people fill those sheets by hand. Its cells stay
     empty and fill in automatically at the first refresh after the row appears.
-  \item A \emph{Comment} typed by hand in this sheet is kept as long as the source sheet has no comment for that ticket.
-    When the source sheet does have one, the source wins and replaces what was typed.
+  \item \emph{Comment} shows what the team wrote in the Jira field \emph{L1 Validation Description} on the ticket, on one
+    line. It is not the \emph{Reply to Customer (Public)} field. A \emph{Comment} typed by hand in this sheet is kept as
+    long as Jira has nothing in that field; as soon as Jira has text, Jira wins.
   \item \emph{Card \#} and \emph{Acc No} are stored as text, so numbers such as \code{0538} keep their leading zero.
   \item \emph{Validation} is a dropdown that uses the same list of choices as the MDP sheet's own Validation column
     (the program reads that list from the MDP sheet on every run). It also accepts values already in the cells.
@@ -363,15 +360,13 @@ is found by the ticket number, as in Section~\ref{sec:routing}.
 \begin{description}[leftmargin=!,labelwidth=3.4cm]
   \item[Assignee] Mego, Helana, Abdallah, Heba, Reem, Samy, Bassem, Mayar. The names are used exactly as written; the
     system never tries to match them to Jira users. The column starts empty.
-  \item[Resolved] \swatch{sheetgreen}~Solved \quad \swatch{sheetyellow}~Pending for customer response \quad
-    \swatch{sheetred}~On hold.
 \end{description}
-Each choice is coloured so the sheet can be scanned quickly. Choices are remembered by ticket key: when the sheet
-refreshes, a choice stays with its ticket even if the ticket moves to a different tab.
+Each name has its own colour so the sheet can be scanned quickly. A choice is remembered by ticket key: when the sheet
+refreshes, it stays with its ticket even if the ticket moves to a different tab.
 
 \begin{warning}[Dropdown choices are only in the sheet]
-Choosing \emph{Solved} here does \textbf{not} change the ticket in Jira. It is a working note for the team, and the
-row stays in the sheet after the ticket is solved or closed.
+Choosing a name here does \textbf{not} assign the ticket in Jira. It is a working note for the team, and the row stays
+in the sheet after the ticket is closed.
 \end{warning}
 
 \subsection{How a ticket is routed to a tab}
@@ -427,10 +422,8 @@ dropdown, without waiting for a refresh.
 
 \textbf{Left table: per team.} One row each for MDB, Installment, Product and Others, and a Total row.
 \begin{itemize}
-  \item \textbf{Total Tickets}: how many tickets are in that team's tab.
-  \item \textbf{Solved}, \textbf{Pending for customer response}, \textbf{On hold}: how many tickets have that
-    \emph{Resolved} choice.
-  \item \textbf{Not Set Yet}: tickets with no \emph{Resolved} choice (total minus the three above).
+  \item \textbf{Total Tickets}: how many tickets are in that team's tab (including the ones kept after they were closed).
+  \item \textbf{Still To Do}: how many of them are still in the Jira status \emph{To Do} or \emph{Clients To Do}.
 \end{itemize}
 \textbf{Right table: per person.} One row for each name in the Assignee dropdown, showing how many tickets that person
 has in MDB, Installment, Product and Others, and a Total. The last row, \textbf{No one picked yet}, counts tickets that
@@ -592,10 +585,10 @@ Editing it by hand will change the Done counts.
 \toprule
 \textbf{Colour} & \textbf{Where and what it means} \\
 \midrule
-\swatch{sheetgreen} Green & \emph{Done}, \emph{Solved}, and the Closed column. \\
+\swatch{sheetgreen} Green & \emph{Done}, and the Closed column. \\
 \swatch{sheetblue} Blue & \emph{In Progress}. \\
-\swatch{sheetyellow} Yellow & \emph{Pending Customer Response}, \emph{Pending for customer response}, and Pending columns. \\
-\swatch{sheetred} Red & \emph{On hold}, \emph{Reopened}, the Untouched column, and \textbf{OVERDUE}. \\
+\swatch{sheetyellow} Yellow & \emph{Pending Customer Response} and the Pending column. \\
+\swatch{sheetred} Red & \emph{Reopened}, the Untouched column, and \textbf{OVERDUE}. \\
 \swatch{sheetgrey} Grey & \emph{To Do}. \\
 \swatch{sheetpurple} Purple & \emph{Clients To Do}. \\
 \bottomrule
@@ -622,7 +615,7 @@ schedule needs no edit. A refresh can also be started by hand (Section~\ref{sec:
 \subsection{What a refresh changes}
 \begin{itemize}
   \item Every tab is cleared and rewritten from fresh data.
-  \item \textbf{Kept:} the team's dropdown choices (Assignee, Resolved, Status), matched by ticket key.
+  \item \textbf{Kept:} the team's dropdown choices (Assignee, Status, Project, and typed Comments), matched by ticket key.
   \item \textbf{Rebuilt:} colours, dropdown lists, and the order of tabs.
   \item \textbf{Live:} all counters and totals are formulas, so they update by themselves.
 \end{itemize}
@@ -846,8 +839,8 @@ delete and re-create the service account key) and put the new values only into t
 \subsection{Open items}
 \begin{enumerate}
   \item Decide the team for the request types that currently land in \emph{Others}.
-  \item Decide whether the In Progress sheet should also get the Backlog table, the Assignee dropdown, or the Resolved
-    dropdown, as on the BO sheet.
+  \item Decide whether the In Progress sheet should also get the Backlog table or the Assignee dropdown,
+    as on the BO sheet.
   \item Replace the GitHub token before 4 November 2026.
   \item Review the monthly free-minute usage in mid-month and at the end of the month.
   \item Revoke and replace the credentials that were shared during development (Chapter~\ref{ch:security}).
@@ -881,7 +874,7 @@ delete and re-create the service account key) and put the new values only into t
 2 & Connection to Jira and Google verified; service account sharing set up. \\
 3 & BO sheet and In Progress sheet created, with Pending Customer Response and Productivity. \\
 4 & Routing into MDB, Installment, Product; Others tab; source sheets read for matching. \\
-5 & Dropdowns (Assignee, Resolved) with colours; Summary and Reporter columns removed. \\
+5 & Assignee dropdown with colours (a Resolved dropdown was added and later removed); Summary and Reporter columns removed. \\
 6 & Automatic refresh with GitHub Actions; schedule tuned to working hours and the free minutes. \\
 7 & In Progress sheet reorganised into team tabs; Status dropdown; 48-hour customer flag; one-row-per-person
 productivity; Backlog table. \\
