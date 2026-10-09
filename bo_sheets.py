@@ -76,7 +76,6 @@ MDB_WORDS = [w.strip().lower() for w in os.environ.get("MDB_KEYWORDS", "").split
 
 REQUEST_TYPE_FIELD = "customfield_11163"
 VALIDATION_FIELD = "customfield_10951"  # Jira "L1 Validation Description" -> the Comment column
-RELATED_FIELD = "customfield_11301"  # Jira "Related Tickets Status", e.g. "Operations (OPS-1934): Pending CS |"
 # Columns copied from each source sheet into the BO tabs: {column on our tab: header in the source sheet}.
 EXTRA_ROWS, MIN_ROWS, EXTRA_COLS, MIN_COLS = 500, 1000, 6, 26  # free space left around every table
 RESOLVED_CHOICES = ["Solved", "Pending for customer response", "On hold"]  # the MDB tab's Resolved dropdown
@@ -463,7 +462,7 @@ def q_backlog():
 def q_open():
     wanted = list(dict.fromkeys([IN_PROGRESS_STATUS, CUSTOMER_STATUS, *OTHER_TEAM_STATUSES]))
     quoted = ", ".join(f'"{x}"' for x in wanted)
-    return (f"project = {PROJECT} AND status in ({quoted})", FIELDS + [RELATED_FIELD], "changelog")
+    return (f"project = {PROJECT} AND status in ({quoted})", FIELDS + [VALIDATION_FIELD], "changelog")
 
 
 def backlog_tab(jira, book):
@@ -607,30 +606,9 @@ def adf_text(node):
     return "".join(adf_text(c) for c in node.get("content", [])) + ("\n" if node.get("type") == "paragraph" else "")
 
 
-def related_tickets(f):
-    """[(team, ticket, status)] from Jira's Related Tickets Status field."""
-    found = []
-    for part in re.split(r"\||\n", adf_text(f.get(RELATED_FIELD))):
-        m = re.match(r"\s*(.+?)\s*\(([A-Z][A-Z0-9]*-\d+)\):\s*(.+?)\s*$", part)
-        if m:
-            found.append((m.group(1), m.group(2), m.group(3)))
-    return found
-
-
-def with_team(f, own):
-    """Which team has the problem now, and the related tickets Jira lists.
-
-    A related ticket whose status mentions CS (Pending CS, PENDING RESPONSE (CS)) is waiting for us, so the
-    problem is back with `own` (BO, or Customer on the pending tab); otherwise it is with that ticket's team."""
-    related = related_tickets(f)
-    if not related:
-        return own, ""
-    detail = "; ".join(f"{team} {key}: {status}" for team, key, status in related)
-    active = list(dict.fromkeys(team for team, _, status in related if not re.search(r"\bCS\b", status)))
-    if active:
-        return ", ".join(active), detail
-    answered = ", ".join(dict.fromkeys(team for team, _, _ in related))
-    return f"{own} (reply from {answered})", detail
+def comment(f):
+    """The Comment column: Jira's L1 Validation Description on one line."""
+    return " ".join(adf_text(f.get(VALIDATION_FIELD)).split())
 
 
 def letter(header, name):
@@ -641,9 +619,8 @@ def team_rows(jira, items, choices, ids_by_tab):
     """In-progress tickets for one team tab. items: [(issue, in-status-since)].
 
     Status is a dropdown the team sets (In Progress / Done); picks made earlier are kept."""
-    header = ["Key", "Link", "Queue", "Request Type", "Summary", "Person", "Status", "Jira Status",
-              "In Status Since", "Hours", "Created", "Days Since Arrived", "Days In Progress",
-              "With Team", "Related Tickets (Jira)"]
+    header = ["Key", "Link", "Queue", "Request Type", "Person", "Status", "Jira Status",
+              "In Status Since", "Created", "Days Since Arrived", "Days In Progress", "Comment"]
     since_col, created_col = letter(header, "In Status Since"), letter(header, "Created")
     status_col = letter(header, "Status")
     # Live counters in the always-visible header row, beside the filtered ticket columns.
@@ -658,23 +635,23 @@ def team_rows(jira, items, choices, ids_by_tab):
         f = i["fields"]
         if len(item) > 2:  # closed in Jira after the team marked it Done: kept, with the counters stopped
             created = parse_dt(f["created"])
-            span = (lambda days: round((since - created).total_seconds() / days, 1) if since else "")
+            span = (lambda days: round((since - created).total_seconds() / days) if since else "")
             rows.append([i["key"], f"{jira.base}/browse/{i['key']}", route(i, ids_by_tab), request_type(f),
-                         f["summary"], person(f.get("assignee")), "Done", f["status"]["name"], fmt(since), span(3600),
-                         fmt(created), span(86400), "", "Closed in Jira", ""])
+                         person(f.get("assignee")), "Done", f["status"]["name"], fmt(since),
+                         fmt(created), span(86400), "", comment(f)])
             continue
-        rows.append([i["key"], f"{jira.base}/browse/{i['key']}", route(i, ids_by_tab), request_type(f), f["summary"],
+        rows.append([i["key"], f"{jira.base}/browse/{i['key']}", route(i, ids_by_tab), request_type(f),
                      person(f.get("assignee")), choices.get(i["key"], "In Progress"), f["status"]["name"],
-                     fmt(since), Formula(f"=ROUND((NOW()-{since_col}{n})*24,1)"), fmt(parse_dt(f["created"])),
-                     Formula(f"=ROUND(NOW()-{created_col}{n},1)"),   # keeps counting up
-                     Formula(f"=ROUND(NOW()-{since_col}{n},1)"), *with_team(f, "BO")])
+                     fmt(since), fmt(parse_dt(f["created"])),
+                     Formula(f"=ROUND(NOW()-{created_col}{n},0)"),   # keeps counting up
+                     Formula(f"=ROUND(NOW()-{since_col}{n},0)"), comment(f)])
     return rows
 
 
 def other_rows(jira, items, ids_by_tab):
     """Everything in one of the OTHER_TEAM_STATUSES: which team it is with, and how long it has been there."""
-    header = ["Key", "Link", "Queue", "Request Type", "Summary", "Person", "Jira Status", "With Team",
-              "In Status Since", "Hours", "Days In Status", "Created", "Days Since Arrived", "Related Tickets (Jira)"]
+    header = ["Key", "Link", "Queue", "Request Type", "Person", "Jira Status", "With Team",
+              "In Status Since", "Days In Status", "Created", "Days Since Arrived", "Comment"]
     since_col, created_col = letter(header, "In Status Since"), letter(header, "Created")
     rows = [header + ["", Formula('="Total: "&COUNTA(A2:A)')]]
     oldest = datetime.min.replace(tzinfo=TZ)
@@ -682,37 +659,31 @@ def other_rows(jira, items, ids_by_tab):
     for n, (i, since) in enumerate(items, start=2):
         f = i["fields"]
         status = f["status"]["name"]
-        team, detail = with_team(f, STATUS_TEAM.get(status, status))
-        # Only In Progress and Pending Customer Response look at the related tickets; every other status already names
-        # the team that has the ticket.
-        team = team if status in (IN_PROGRESS_STATUS, CUSTOMER_STATUS) else STATUS_TEAM.get(status, status)
-        rows.append([i["key"], f"{jira.base}/browse/{i['key']}", route(i, ids_by_tab), request_type(f), f["summary"],
-                     person(f.get("assignee")), status, team, fmt(since),
-                     Formula(f"=ROUND((NOW()-{since_col}{n})*24,1)"), Formula(f"=ROUND(NOW()-{since_col}{n},1)"),
-                     fmt(parse_dt(f["created"])), Formula(f"=ROUND(NOW()-{created_col}{n},1)"), detail])
+        rows.append([i["key"], f"{jira.base}/browse/{i['key']}", route(i, ids_by_tab), request_type(f),
+                     person(f.get("assignee")), status, STATUS_TEAM.get(status, status), fmt(since),
+                     Formula(f"=ROUND(NOW()-{since_col}{n},0)"), fmt(parse_dt(f["created"])),
+                     Formula(f"=ROUND(NOW()-{created_col}{n},0)"), comment(f)])
     return rows
 
 
 def pending_rows(jira, items):
     """Tickets sent back to the customer. The overdue flag lives only here (PENDING_SLA_HOURS)."""
     over_label = f"Over {PENDING_SLA_HOURS}h?"
-    header = ["Key", "Link", "Request Type", "Summary", "Person", "Status", "Sent To Customer",
-              "Hours", over_label, "Created", "Days Since Arrived", "Days Waiting For Customer",
-              "With Team", "Related Tickets (Jira)"]
+    header = ["Key", "Link", "Request Type", "Person", "Status", "Sent To Customer", over_label,
+              "Created", "Days Since Arrived", "Days Waiting For Customer", "Comment"]
     since_col, created_col = letter(header, "Sent To Customer"), letter(header, "Created")
-    hours_col, over_col = letter(header, "Hours"), letter(header, over_label)
+    over_col = letter(header, over_label)
     rows = [header + ["", Formula('="Total: "&COUNTA(A2:A)'),
                       Formula(f'="Overdue: "&COUNTIF({over_col}2:{over_col},"OVERDUE")')]]
     items = sorted(items, key=lambda x: (person(x[0]["fields"].get("assignee")), x[1]))
     for n, (i, since) in enumerate(items, start=2):
         f = i["fields"]
-        rows.append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f), f["summary"],
+        rows.append([i["key"], f"{jira.base}/browse/{i['key']}", request_type(f),
                      person(f.get("assignee")), f["status"]["name"], fmt(since),
-                     Formula(f"=ROUND((NOW()-{since_col}{n})*24,1)"),
-                     Formula(f'=IF({hours_col}{n}>{PENDING_SLA_HOURS},"OVERDUE","")'),
+                     Formula(f'=IF((NOW()-{since_col}{n})*24>{PENDING_SLA_HOURS},"OVERDUE","")'),
                      fmt(parse_dt(f["created"])),
-                     Formula(f"=ROUND(NOW()-{created_col}{n},1)"),
-                     Formula(f"=ROUND(NOW()-{since_col}{n},1)"), *with_team(f, "Customer")])
+                     Formula(f"=ROUND(NOW()-{created_col}{n},0)"),
+                     Formula(f"=ROUND(NOW()-{since_col}{n},0)"), comment(f)])
     return rows
 
 
@@ -812,14 +783,14 @@ def progress_book(jira, book, ids_by_tab, log):
         if name == CUSTOMER_STATUS:
             customer.append((i, since))
             counts[who]["customer"] += 1
-        if name in OTHER_TEAM_STATUSES:
+        if name in OTHER_TEAM_STATUSES and name not in (IN_PROGRESS_STATUS, CUSTOMER_STATUS):
             other.append((i, since))
     # Tickets the team marked Done stay on the sheet after Jira closes them. They are already counted as Done
     # through the Done Log below, so they are not counted again here.
     open_keys = {i["key"] for i in open_issues}
     kept = sorted(k for k, v in choices.items() if v == "Done" and k not in open_keys)
     for start in range(0, len(kept), 100):
-        for i in jira.search(f"key in ({', '.join(kept[start:start + 100])})", FIELDS):
+        for i in jira.search(f"key in ({', '.join(kept[start:start + 100])})", FIELDS + [VALIDATION_FIELD]):
             if not excluded(person(i["fields"].get("assignee"))):
                 closed = entries.get(i["key"])
                 (assigned if i["fields"].get("assignee") else unassigned).append(
@@ -830,17 +801,17 @@ def progress_book(jira, book, ids_by_tab, log):
     counts.pop("Unassigned", None)
 
     specs = []
-    hours = {"Hours": "0.0", "Days Since Arrived": "0.0"}
+    hours = {"Days Since Arrived": "0"}
     for title, items in ((TAB_INPROGRESS, assigned), (TAB_UNASSIGNED, unassigned)):
         rows = team_rows(jira, items, choices, ids_by_tab)
-        ws = write_tab(book, title, rows, {**hours, "Days In Progress": "0.0"},
+        ws = write_tab(book, title, rows, {**hours, "Days In Progress": "0"},
                        dropdowns={"Status": PROGRESS_CHOICES}, filter_cols=rows[0].index(""))
         specs.append((ws, rows[0].index("Status"), STATUS_COLORS))
     rows = other_rows(jira, other, ids_by_tab)
-    ws = write_tab(book, TAB_OTHER, rows, {**hours, "Days In Status": "0.0"}, filter_cols=rows[0].index(""))
+    ws = write_tab(book, TAB_OTHER, rows, {**hours, "Days In Status": "0"}, filter_cols=rows[0].index(""))
     specs.append((ws, rows[0].index("Jira Status"), STATUS_COLORS))
     rows = pending_rows(jira, customer)
-    ws = write_tab(book, TAB_PENDING, rows, {**hours, "Days Waiting For Customer": "0.0"},
+    ws = write_tab(book, TAB_PENDING, rows, {**hours, "Days Waiting For Customer": "0"},
                    filter_cols=rows[0].index(""))
     specs += [(ws, rows[0].index("Status"), STATUS_COLORS),
               (ws, rows[0].index(f"Over {PENDING_SLA_HOURS}h?"), {"OVERDUE": "#ea9999"})]
