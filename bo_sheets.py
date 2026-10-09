@@ -804,7 +804,8 @@ def progress_book(jira, book, ids_by_tab, log):
     for title, items in ((TAB_INPROGRESS, assigned), (TAB_UNASSIGNED, unassigned)):
         rows = team_rows(jira, items, ids_by_tab)
         ws = write_tab(book, title, rows, {**hours, "Days In Progress": "0"}, filter_cols=rows[0].index(""))
-        specs.append((ws, rows[0].index("Jira Status"), STATUS_COLORS))
+        specs += [(ws, rows[0].index("Jira Status"), STATUS_COLORS),
+                  (ws, rows[0].index("Days In Progress"), "#e06666")]  # the longer in progress, the redder
     rows = other_rows(jira, other, ids_by_tab)
     ws = write_tab(book, TAB_OTHER, rows, {**hours, "Days In Status": "0"}, filter_cols=rows[0].index(""))
     specs.append((ws, rows[0].index("Jira Status"), STATUS_COLORS))
