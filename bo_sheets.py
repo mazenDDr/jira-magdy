@@ -652,7 +652,7 @@ def done_tab_rows(jira, items, ids_by_tab):
 def other_rows(jira, items, ids_by_tab):
     """Everything in one of the OTHER_TEAM_STATUSES: which team it is with, and how long it has been there."""
     header = ["Key", "Link", "Queue", "Request Type", "Person", "Jira Status", "With Team",
-              "In Status Since", "Days In Status", "Created", "Days Since Arrived", "Comment"]
+              "Created", "Days Since Arrived", "In Status Since", "Days In Status", "Comment"]
     since_col, created_col = letter(header, "In Status Since"), letter(header, "Created")
     rows = [header + ["", Formula('="Total: "&COUNTA(A2:A)')]]
     oldest = datetime.min.replace(tzinfo=TZ)
@@ -661,9 +661,9 @@ def other_rows(jira, items, ids_by_tab):
         f = i["fields"]
         status = f["status"]["name"]
         rows.append([i["key"], f"{jira.base}/browse/{i['key']}", route(i, ids_by_tab), request_type(f),
-                     person(f.get("assignee")), status, STATUS_TEAM.get(status, status), fmt(since),
-                     Formula(f"=ROUND(NOW()-{since_col}{n},0)"), fmt(parse_dt(f["created"])),
-                     Formula(f"=ROUND(NOW()-{created_col}{n},0)"), comment(f)])
+                     person(f.get("assignee")), status, STATUS_TEAM.get(status, status),
+                     fmt(parse_dt(f["created"])), Formula(f"=ROUND(NOW()-{created_col}{n},0)"), fmt(since),
+                     Formula(f"=ROUND(NOW()-{since_col}{n},0)"), comment(f)])
     return rows
 
 
@@ -809,7 +809,8 @@ def progress_book(jira, book, ids_by_tab, log):
                   (ws, rows[0].index("Days In Progress"), "#e06666")]  # the longer in progress, the redder
     rows = other_rows(jira, other, ids_by_tab)
     ws = write_tab(book, TAB_OTHER, rows, {**hours, "Days In Status": "0"}, filter_cols=rows[0].index(""))
-    specs.append((ws, rows[0].index("Jira Status"), STATUS_COLORS))
+    specs += [(ws, rows[0].index("Jira Status"), STATUS_COLORS),
+              (ws, rows[0].index("Days In Status"), "#e06666")]  # the longer in a status, the redder
     rows = pending_rows(jira, customer)
     ws = write_tab(book, TAB_PENDING, rows, {**hours, "Days Waiting For Customer": "0"},
                    filter_cols=rows[0].index(""))
