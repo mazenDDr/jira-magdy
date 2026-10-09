@@ -131,6 +131,18 @@ class Jira:
             return self._futures[key].result()
         return self._fetch(jql, fields, expand)
 
+    def check_login(self):
+        """Stop before touching any sheet if Jira does not accept the login.
+
+        Jira answers a search from a rejected login with "no results" instead of an error, which used to
+        look like an empty board and wipe the sheets."""
+        s = requests.Session()
+        s.auth = self.auth
+        r = s.get(f"{self.base}/rest/api/3/myself", headers={"Accept": "application/json"}, timeout=60)
+        if r.status_code != 200:
+            raise RuntimeError(f"Jira login failed (HTTP {r.status_code}). The JIRA_API_TOKEN is wrong, expired or "
+                               "revoked. Nothing was written to the sheets.")
+
     def get(self, path):
         s = requests.Session()
         s.auth = self.auth
@@ -508,6 +520,8 @@ def todo_tabs(jira, book, ids_by_tab, data_by_tab, lists_by_tab):
     # again later. Its Status column keeps following Jira.
     listed = set(picks["Key"])
     everything = jira.search(*q_backlog())
+    if not everything:  # a real board always has tickets since BO_FROM; an empty answer means something is wrong
+        raise RuntimeError(f"Jira returned no tickets created since {BO_FROM}. Refusing to overwrite the sheets.")
     issues = sorted((i for i in everything if i["fields"]["status"]["name"] in BO_TODO_STATUSES or i["key"] in listed),
                     key=lambda i: i["fields"]["created"], reverse=True)
     todo = sum(i["fields"]["status"]["name"] in BO_TODO_STATUSES for i in everything)
@@ -814,6 +828,7 @@ def progress_book(jira, book, ids_by_tab, log):
 def main():
     started = time.time()
     jira = Jira()
+    jira.check_login()
     gc = google()
     book1 = gc.open_by_key(env("BO_SHEET_ID"))
     book2 = gc.open_by_key(env("INPROGRESS_SHEET_ID"))
