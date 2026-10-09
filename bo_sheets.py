@@ -14,6 +14,7 @@ Config comes from environment variables; see .env.example. Run it again to refre
 """
 
 import faulthandler
+import hashlib
 import json
 import os
 import re
@@ -52,6 +53,9 @@ SOURCES = {
 EXCLUDED_PEOPLE = {x.strip().lower() for x in os.environ.get(
     "EXCLUDED_PEOPLE", "loay.khaled,nourhan.khaled,mohanad.maher,Abdullah Mubark").split(",") if x.strip()}
 # Jira statuses that count as "In Progress" in sheet 2 (the ticket is being worked by the BO team).
+# Besides every status Jira files under Done, the "finished" statuses are those starting with one of these words
+# (Resolved by L2, Resolved BO, ...), so the done tab follows the Jira status.
+DONE_PREFIXES = tuple(x.strip().lower() for x in os.environ.get("DONE_PREFIXES", "Resolved").split(",") if x.strip())
 IN_PROGRESS_STATUS = os.environ.get("IN_PROGRESS_STATUS", "In Progress")
 # Everything shown on the "Other Teams" tab: tickets in any of these Jira statuses (any age).
 OTHER_TEAM_STATUSES = [x.strip() for x in os.environ.get(
@@ -576,7 +580,8 @@ def todo_tabs(jira, book, ids_by_tab, data_by_tab):
 
 def done_statuses(jira):
     if not hasattr(jira, "_done"):
-        jira._done = {st["name"] for st in jira.get("/rest/api/3/status") if st["statusCategory"]["key"] == "done"}
+        jira._done = {st["name"] for st in jira.get("/rest/api/3/status")
+                      if st["statusCategory"]["key"] == "done" or st["name"].lower().startswith(DONE_PREFIXES)}
     return jira._done
 
 
@@ -705,16 +710,25 @@ def done_plan(last_sync):
     return max(6, int(age.total_seconds() // 3600) + 4)
 
 
-def q_done(window):
-    return (f"project = {PROJECT} AND status changed DURING ({window}, now()) AND statusCategory = Done",
+def quoted_done(jira):
+    return ", ".join(f'"{name}"' for name in sorted(done_statuses(jira)))
+
+
+def q_done(jira, window):
+    return (f"project = {PROJECT} AND status changed DURING ({window}, now()) AND status in ({quoted_done(jira)})",
             FIELDS, "changelog")
 
 
-def q_reopened(hours):
-    return (f"project = {PROJECT} AND status changed DURING (-{hours}h, now()) AND statusCategory != Done", ["status"])
+def q_reopened(jira, hours):
+    return (f"project = {PROJECT} AND status changed DURING (-{hours}h, now()) AND status not in ({quoted_done(jira)})",
+            ["status"])
 
 
-def load_done_log(book):
+def done_signature(jira):
+    return hashlib.md5(",".join(sorted(done_statuses(jira))).encode()).hexdigest()[:10]
+
+
+def load_done_log(book, jira):
     """The saved history of who closed what: ({ticket: (when, who)}, time of last sync)."""
     cache = tab_cache(book)
     if DONE_LOG_TAB not in cache:
@@ -722,6 +736,8 @@ def load_done_log(book):
     values = book.values_batch_get([f"'{DONE_LOG_TAB}'"])["valueRanges"][0].get("values", [])
     entries, last_sync = {}, None
     for row in values[1:]:
+        if len(row) > 5 and row[5] and row[5] != done_signature(jira):
+            return {}, None  # the set of finished statuses changed: rebuild the whole history
         if len(row) > 4 and row[4]:
             last_sync = datetime.fromtimestamp(int(row[4]), TZ)
         if row and row[0] and len(row) > 2 and row[1]:
@@ -734,10 +750,10 @@ def refresh_done_log(jira, entries, last_sync, window):
     done = done_statuses(jira)
     hours = done_plan(last_sync)
     if hours is None:
-        entries, closed = {}, jira.search(*q_done(f"-{PRODUCTIVITY_DAYS}d"))
+        entries, closed = {}, jira.search(*q_done(jira, f"-{PRODUCTIVITY_DAYS}d"))
     else:
-        closed = jira.search(*q_done(f"-{hours}h"))
-        for i in jira.search(*q_reopened(hours)):  # opened again since: no longer counts as done
+        closed = jira.search(*q_done(jira, f"-{hours}h"))
+        for i in jira.search(*q_reopened(jira, hours)):  # opened again since: no longer counts as done
             entries.pop(i["key"], None)
     for i in closed:
         info = done_info(i, done, window)
@@ -746,13 +762,13 @@ def refresh_done_log(jira, entries, last_sync, window):
     return {k: v for k, v in entries.items() if v[0] >= window}
 
 
-def done_log_rows(entries):
+def done_log_rows(entries, signature):
     now = int(datetime.now(TZ).timestamp())
-    rows = [["Key", "Done At", "By", "", "Last Sync"]]
+    rows = [["Key", "Done At", "By", "", "Last Sync", "Statuses"]]
     for n, (key, (when, who)) in enumerate(sorted(entries.items())):
-        rows.append([key, int(when.timestamp()), who, "", now if n == 0 else ""])
+        rows.append([key, int(when.timestamp()), who, "", now if n == 0 else "", signature if n == 0 else ""])
     if len(rows) == 1:
-        rows.append(["", "", "", "", now])
+        rows.append(["", "", "", "", now, signature])
     return rows
 
 
@@ -817,7 +833,7 @@ def progress_book(jira, book, ids_by_tab, log):
     rows = productivity_rows(counts)
     ws = write_tab(book, "Productivity", rows, filter_cols=5)
     specs += [(ws, 2, "#f6b26b"), (ws, 3, "#57bb8a"), (ws, 4, "#ffd966")]
-    write_tab(book, DONE_LOG_TAB, done_log_rows(entries), hidden=True)  # kept for the next run, hidden from view
+    write_tab(book, DONE_LOG_TAB, done_log_rows(entries, done_signature(jira)), hidden=True)  # kept for the next run, hidden from view
     flush(book)
     apply_colors(book, specs)
     current = {t.lower() for t in (TAB_INPROGRESS, TAB_UNASSIGNED, TAB_OTHER, TAB_PENDING, TAB_DONE)}
@@ -839,16 +855,15 @@ def main():
     for book in (book1, book2):
         if book.timezone != TZ.key:
             set_timezone(book)
-    log = load_done_log(book2)
+    log = load_done_log(book2, jira)
 
     # Start every Jira query now so they run while the source sheets are being read.
     for query in (q_backlog(), q_open()):
         jira.prefetch(*query)
     hours = done_plan(log[1])
-    jira.prefetch(*q_done(f"-{PRODUCTIVITY_DAYS}d" if hours is None else f"-{hours}h"))
+    jira.prefetch(*q_done(jira, f"-{PRODUCTIVITY_DAYS}d" if hours is None else f"-{hours}h"))
     if hours is not None:
-        jira.prefetch(*q_reopened(hours))
-    jira._pool.submit(done_statuses, jira)
+        jira.prefetch(*q_reopened(jira, hours))
     with ThreadPoolExecutor(len(SOURCES)) as pool:  # each source sheet gets its own Google client
         futures = {tab: pool.submit(read_source, google(), sid, st, SOURCE_COLUMNS.get(tab, {}))
                    for tab, (sid, st) in SOURCES.items()}
